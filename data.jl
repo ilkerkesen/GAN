@@ -22,7 +22,7 @@ end
 function gzload(file; path=Knet.dir("data",file), url="http://yann.lecun.com/exdb/mnist/$file")
     isfile(path) || download(url, path)
     f = gzopen(path)
-    a = @compat read(f)
+    a = read(f)
     close(f)
     return(a)
 end

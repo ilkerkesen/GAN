@@ -10,8 +10,8 @@ include("model.jl")
 function main(args)
     s = ArgParseSettings()
     s.description = string(
-        "Show and Tell: A Neural Image Caption Generator",
-        " Knet implementation by Ilker Kesen [ikesen16_at_ku.edu.tr], 2016.")
+        "General Adversarial Networks implementation in Knet on MNIST data.",
+        " by Ilker Kesen [ikesen16_at_ku.edu.tr], 2017.")
 
     @add_arg_table s begin
         ("--loadfile"; default=nothing; help="pretrained model file if any")
@@ -20,7 +20,7 @@ function main(args)
         ("--noisedim"; arg_type=Int64; default=100)
         ("--wdinit"; arg_type=Float32; default=Float32(0.005))
         ("--wginit"; arg_type=Float32; default=Float32(0.05))
-        ("--nscale"; arg_type=Float32; default=Float32(0.05))
+        ("--nscale"; arg_type=Float32; default=Float32(0.1))
         ("--dunits"; arg_type=Int64; nargs=2; default=[240,240])
         ("--gunits"; arg_type=Int64; nargs=2; default=[1200,1200])
         ("--maxouts"; arg_type=Int64; nargs=2; default=[5,5])
@@ -46,15 +46,17 @@ function main(args)
 
     # get parameters
     atype = !o[:nogpu] ? KnetArray{Float32} : Array{Float32}
-    wd = initD(atype, o[:maxouts], o[:dunits], o[:wdinits], size(dtrn[1][1],1))
-    wg = initG(atype, o[:gunits], o[:wginits], o[:noisedim], size(dtrn[1][1],1))
+    noisedim, nscale = o[:noisedim], o[:nscale]
+    wd = initD(atype, o[:maxouts], o[:dunits], o[:wdinit], size(dtrn[1][1],1))
+    wg = initG(atype, o[:gunits], o[:wginit], o[:noisedim], size(dtrn[1][1],1))
+    pdrops = Dict("h0" => o[:h0drop], "h1" => o[:h1drop])
 
     # gradient check
     if o[:gcheck] > 0
         x = convert(atype, dtrn[1][1])
         z = sample_noise(atype, size(x,2), o[:noisedim], o[:nscale])
-        gradcheck(loss1, wd, wg, x, z; gcheck=o[:gcheck])
-        gradcheck(loss2, wg, wd, z; gcheck=o[:gcheck])
+        gradcheck(loss, wd, wg, x, z; gcheck=o[:gcheck])
+        gradcheck(loss, wg, wd, z; gcheck=o[:gcheck])
     end
 
     # initialize optimization params, using ADAM
@@ -70,21 +72,45 @@ function main(args)
     # training
     nbatches = length(dtrn)
     for epoch = 1:o[:epochs]
+        tic()
         for k = 1:nbatches
             x = convert(atype, dtrn[k][1])
-            train!(wd, wz, x, optd, optg, pdrops)
+            train!(wd, wg, x, optd, optg, atype, noisedim, nscale, pdrops)
         end
+        lossval = test(wd, wg, dtrn, atype, noisedim, nscale)
+        @printf("epoch: %d, loss:%g\n", epoch, lossval); flush(STDOUT)
+        toc()
     end
+    o[:savefile] != nothing && save(o[:savefile], "wd", wd, "wg", wg)
 end
 
 # one minibatch training
-function train!(wd, wz, x, optd, optg, atype, noisedim, nscale, pdrops)
+function train!(wd, wg, x, optd, optg, atype, noisedim, nscale, pdrops)
+    # discriminator training
     z = sample_noise(atype, size(x,2), noisedim, nscale)
-    gloss = lossgradient1(wd, wz, x, z)
-    map!(k -> update!(wd[k], gloss[k], optd[k]), 1:length(wd))
+    gloss = lossgradient(wd, wg, x, z)
+    for k = 1:length(wd)
+        update!(wd[k], gloss[k], optd[k])
+    end
+
+    # generator training
     z = sample_noise(atype, size(x,2), noisedim, nscale)
-    gloss = lossgradient2(wz, wd, z)
-    map!(k -> update!(wg[k], gloss[k], optg[k]), 1:length(wg))
+    gloss = lossgradient(wg, wd, z)
+    for k = 1:length(wg)
+        update!(wg[k], gloss[k], optg[k])
+    end
+end
+
+function test(wd, wg, data, atype, noisedim, nscale)
+    total, count = 0, 0
+    nbatches = length(data)
+    for k = 1:nbatches
+        x = convert(atype, data[k][1])
+        z = sample_noise(atype, size(x,2), noisedim, nscale)
+        total += loss(wd,wg,x,z)
+        count += 1
+    end
+    return total/count
 end
 
 !isinteractive() && !isdefined(Core.Main, :load_only) && main(ARGS)

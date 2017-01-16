@@ -7,8 +7,8 @@ function dropout(x,d)
 end
 
 function D(w,x; maxouts=[5,5])
-    h0 = max(map(w1i -> w1i*x, w[1:maxouts[1]])...)
-    h1 = max(map(w2i -> w2i*h0, w[maxouts[1]+1:sum(maxouts[2])])...)
+    h0 = max(map(k -> w[k]*x, 1:maxouts[1])...)
+    h1 = max(map(k -> w[k]*h0, maxouts[1]+1:sum(maxouts))...)
     y  = sigm(w[sum(maxouts)+1]*h1)
 end
 
@@ -21,11 +21,9 @@ function G(w,z; pdrops=Dict())
     y  = sigm(w[3] * h1)
 end
 
-loss1(wd,wz,x,z) = -(log(D(wd,x)) + log(1-D(wd,G(wz,z)))) / size(z,2)
-loss2(wz,z) = log(1-D(G(z))) / size(z,2)
-
-lossgradient1 = grad(loss1)
-lossgradient2 = grad(loss2)
+loss(wd,wg,x,z) = -sum(log(D(wd,x)) + log(1-D(wd,G(wg,z)))) / size(z,2)
+loss(wg,wd,z) = sum(log(1-D(wd,G(wg,z)))) / size(z,2)
+lossgradient = grad(loss)
 
 function initD(atype, maxouts, units, winit, inputdim)
     w1 = map(i->convert(atype,winit*randn(units[1],inputdim)),1:maxouts[1])
