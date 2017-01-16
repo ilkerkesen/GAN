@@ -6,39 +6,58 @@ function dropout(x,d)
     end
 end
 
-function D(w,x; maxouts=[5,5])
-    h0 = max(map(k -> w[k]*x, 1:maxouts[1])...)
-    h1 = max(map(k -> w[k]*h0, maxouts[1]+1:sum(maxouts))...)
-    y  = sigm(w[sum(maxouts)+1]*h1)
+function D(wd,x; maxouts=[5,5])
+    h0 = max(map(k -> wd[2*k-1]*x  .+ wd[2*k], 1:maxouts[1])...)
+    h1 = max(map(k -> wd[2*k-1]*h0 .+ wd[2*k], maxouts[1]+1:sum(maxouts))...)
+    k  = 2*sum(maxouts)+1
+    y  = sigm(wd[k] * h1 .+ wd[k+1])
 end
 
-function G(w,z; pdrops=Dict())
-    d0 = get(pdrops, "h0", 0.0)
-    d1 = get(pdrops, "h1", 0.0)
+function G(wg,z; pdrops=Dict())
+    d0 = get(pdrops, "h0", 0)
+    d1 = get(pdrops, "h1", 0)
 
-    h0 = dropout(relu(w[1] * z), d0)
-    h1 = dropout(relu(w[2] * h0), d1)
-    y  = sigm(w[3] * h1)
+    h0 = dropout(relu(wg[1] * z .+ wg[2]), d0)
+    h1 = dropout(relu(wg[3] * h0 .+ wg[4]), d1)
+    y  = sigm(wg[5] * h1 .+ wg[6])
 end
 
-loss(wd,wg,x,z) = -sum(log(D(wd,x)) + log(1-D(wd,G(wg,z)))) / size(z,2)
-loss(wg,wd,z) = sum(log(1-D(wd,G(wg,z)))) / size(z,2)
+function loss(wd,wg,x,z; maxouts=[5,5], pdrops=Dict())
+    -sum(log(D(wd,x; maxouts=maxouts)) +
+         log(1-D(wd,G(wg,z; pdrops=pdrops); maxouts=maxouts))) / size(z,2)
+end
+function loss(wg,wd,z; maxouts=[5,5], pdrops=Dict())
+    sum(log(1-D(wd,G(wg,z; pdrops=pdrops); maxouts=maxouts))) / size(z,2)
+end
 lossgradient = grad(loss)
 
 function initD(atype, maxouts, units, winit, inputdim)
-    w1 = map(i->convert(atype,winit*randn(units[1],inputdim)),1:maxouts[1])
-    w2 = map(i->convert(atype,winit*randn(units[2],units[1])),1:maxouts[2])
-    w3 = convert(atype, winit*randn(1,units[2]))
-    ws = [w1..., w2..., w3]
+    w = Array(Any, 2*(sum(maxouts)+1))
+    outputdim = 1
+    for k = 1:maxouts[1]
+        w[2*k-1] = convert(atype,winit*randn(units[1],inputdim))
+        w[2*k]   = convert(atype,winit*randn(units[1],1))
+    end
+    for k = 1:maxouts[2]
+        w[2*maxouts[1]+2*k-1] = convert(atype,winit*randn(units[2],units[1]))
+        w[2*maxouts[1]+2*k]   = convert(atype,winit*randn(units[2],1))
+    end
+    w[end-1] = convert(atype,winit*randn(outputdim,units[2]))
+    w[end]   = convert(atype,winit*randn(outputdim,1))
+    return w
 end
 
 function initG(atype, units, winit, inputdim, outputdim)
-    w1 = convert(atype,winit*randn(units[1],inputdim))
-    w2 = convert(atype,winit*randn(units[2],units[1]))
-    w3 = convert(atype,winit*randn(outputdim,units[2]))
-    ws = [w1, w2, w3]
+    w = Array(Any, 6)
+    w[1] = convert(atype,winit*randn(units[1],inputdim))
+    w[2] = convert(atype,winit*randn(units[1],1))
+    w[3] = convert(atype,winit*randn(units[2],units[1]))
+    w[4] = convert(atype,winit*randn(units[2],1))
+    w[5] = convert(atype,winit*randn(outputdim,units[2]))
+    w[6] = convert(atype,winit*randn(outputdim,1))
+    return w
 end
 
 function sample_noise(atype, batchsize, dimension, scale)
-    return convert(atype, scale*randn(dimension,batchsize))
+    return convert(atype, sort(scale*randn(dimension,batchsize),1))
 end
