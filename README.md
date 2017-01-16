@@ -1,2 +1,2 @@
-# mnist-gan
-Adversarial Networks on MNIST dataset
+# adversarial
+General Adversarial Networks in Knet
