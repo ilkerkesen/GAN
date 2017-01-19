@@ -1,2 +1,2 @@
 # adversarial
-General Adversarial Networks in Knet
+Generative Adversarial Networks in Knet
