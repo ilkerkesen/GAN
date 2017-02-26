@@ -17,20 +17,15 @@ function main(args)
         ("--loadfile"; default=nothing; help="pretrained model file if any")
         ("--savefile"; default=nothing; help="model save file after train")
         ("--nogpu"; action=:store_true)
-        ("--noisedim"; arg_type=Int64; default=100)
-        ("--wdinit"; arg_type=Float32; default=Float32(0.005))
-        ("--wginit"; arg_type=Float32; default=Float32(0.05))
-        ("--nscale"; arg_type=Float32; default=Float32(1.25))
-        ("--dunits"; arg_type=Int64; nargs=2; default=[240,240])
-        ("--gunits"; arg_type=Int64; nargs=2; default=[1200,1200])
-        ("--maxouts"; arg_type=Int64; nargs=2; default=[5,5])
+        ("--hdim"; arg_type=Int64; default=128)
+        ("--zdim"; arg_type=Int64; default=100)
+        ("--winit"; arg_type=Float32; default=Float32(0.01))
         ("--epochs"; arg_type=Int; default=100)
         ("--batchsize"; arg_type=Int; default=100)
-        ("--lr"; arg_type=Float32; default=Float32(0.01))
-        ("--seed"; arg_type=Int; default=1; help="random seed")
+        ("--lr"; arg_type=Float32; default=Float32(0.001))
+        ("--adam"; action=:store_true; help="adam optimizer")
+        ("--seed"; arg_type=Int; default=-1; help="random seed")
         ("--gcheck"; arg_type=Int; default=0; help="gradient checking")
-        ("--h0drop"; arg_type=Float32; default=Float32(0.2))
-        ("--h1drop"; arg_type=Float32; default=Float32(0.0))
     end
 
     # parse args
@@ -41,87 +36,83 @@ function main(args)
 
     # load data
     (xtrn,xtst,ytrn,ytst)=loaddata()
-    dtrn = minibatch(xtrn, ytrn, o[:batchsize])
-    dtst = minibatch(xtst, ytst, o[:batchsize])
+    trn = minibatch(xtrn, ytrn, o[:batchsize])
+    tst = minibatch(xtst, ytst, o[:batchsize])
 
     # get parameters
     atype = !o[:nogpu] ? KnetArray{Float32} : Array{Float32}
-    maxouts, noisedim, nscale = o[:maxouts], o[:noisedim], o[:nscale]
-    wd = initD(atype, o[:maxouts], o[:dunits], o[:wdinit], size(dtrn[1][1],1))
-    wg = initG(atype, o[:gunits], o[:wginit], o[:noisedim], size(dtrn[1][1],1))
-    pdrops = Dict("h0" => o[:h0drop], "h1" => o[:h1drop])
+    wd, wg = initweights(atype, size(trn[1][1],1), o[:hdim], o[:zdim])
 
     # gradient check
     if o[:gcheck] > 0
-        x = convert(atype, dtrn[1][1])
-        z = sample_noise(atype, size(x,2), o[:noisedim], o[:nscale])
+        x = convert(atype, trn[1][1])
+        z = sample_noise(atype, size(trn[1][1],2), o[:zdim])
         gradcheck(loss, wd, wg, x, z; gcheck=o[:gcheck])
         gradcheck(loss, wg, wd, z; gcheck=o[:gcheck])
     end
 
     # initialize optimization params, using ADAM
-    optd = Array(Any, length(wd))
-    optg = Array(Any, length(wg))
-    for k = 1:length(wd)
-        optd[k] = Adam(wd[k]; lr=o[:lr])
-    end
-    for k = 1:length(wg)
-        optg[k] = Adam(wg[k]; lr=o[:lr])
-    end
+    optd = initopt(wd,o[:lr])
+    optg = initopt(wg,o[:lr])
+    sample(x) = sample_noise(atype, size(x,2), o[:zdim])
 
-    # training
-    nbatches = length(dtrn)
-    prevloss = Inf
+    # performance with random initialization
+    loss1, loss2 = test(wd,wg,trn,o)
+    @printf("\nepoch: %d, losses: %g/%g [trn]\n", 0, loss1, loss2)
+    loss1, loss2 = test(wd,wg,tst,o)
+    @printf("epoch: %d, losses: %g/%g [tst]\n", 0, loss1, loss2)
+    println(); flush(STDOUT)
+
+
+    # training, loss1 => discriminator, loss2 => generator
     for epoch = 1:o[:epochs]
-        tic()
-        for k = 1:nbatches
-            x = convert(atype, dtrn[k][1])
-            train!(wd, wg, x, optd, optg, atype, noisedim, nscale, maxouts, pdrops)
+        shuffle!(trn)
+        loss1 = loss2 = 0
+        for i = 1:length(trn)
+            x = convert(atype, trn[i][1])
+            z = convert(atype, sample(x))
+
+            losses = train!(wd,wg,x,z,optd,optg)
+            loss1 += losses[1]; loss2 += losses[2]
         end
-        lossval1 = test(wd, wg, dtrn, atype, noisedim, nscale, maxouts)
-        lossval2 = test(wd, wg, dtst, atype, noisedim, nscale, maxouts)
-        @printf("\nepoch: %d, loss: %g/%g\n", epoch, lossval1, lossval2)
-        flush(STDOUT)
-        if o[:savefile] != nothing && lossval2 < prevloss
-            save(o[:savefile],
-                 "wd", map(Array, wd),
-                 "wg", map(Array, wg),
-                 "noisedim", noisedim,
-                 "nscale", nscale,
-                 "maxouts", maxouts)
-            @printf("Model saved.\n"); flush(STDOUT)
-        end
-        toc()
+
+        loss1, loss2 = test(wd,wg,trn,o)
+        @printf("epoch: %d, losses: %g/%g [trn]\n", epoch, loss1, loss2)
+        loss1, loss2 = test(wd,wg,tst,o)
+        @printf("epoch: %d, losses: %g/%g [tst]\n", epoch, loss1, loss2)
+        println(); flush(STDOUT)
+    end
+
+    if o[:savefile] != nothing
+        save(o[:savefile],
+             "wd", map(Array, wd),
+             "wg", map(Array, wg))
+        @printf("Model saved.\n"); flush(STDOUT)
     end
 end
 
-# one minibatch training
-function train!(wd, wg, x, optd, optg, atype, noisedim, nscale, maxouts, pdrops)
-    # discriminator training
-    z = sample_noise(atype, size(x,2), noisedim, nscale)
-    gloss = lossgradient(wd, wg, x, z; maxouts=maxouts, pdrops=pdrops)
-    for k = 1:length(wd)
-        update!(wd[k], gloss[k], optd[k])
-    end
+initopt(w,lr) = map(x->Adam(x;lr=lr), w)
 
-    # generator training
-    z = sample_noise(atype, size(x,2), noisedim, nscale)
-    gloss = lossgradient(wg, wd, z; maxouts=maxouts, pdrops=pdrops)
-    for k = 1:length(wg)
-        update!(wg[k], gloss[k], optg[k])
-    end
+function train!(wd,wg,x,z,optd,optg)
+    values = []
+    g = dlossgradient(wd,wg,x,z,values)
+    for k = 1:length(wd); update!(wd[k], g[k], optd[k]); end
+    g = glossgradient(wg,wd,z,values)
+    for k = 1:length(wg); update!(wg[k], g[k], optg[k]); end
+    return values
 end
 
-function test(wd, wg, data, atype, noisedim, nscale, maxouts)
-    total, count = 0, 0
-    nbatches = length(data)
-    for k = 1:nbatches
-        x = convert(atype, data[k][1])
-        z = sample_noise(atype, size(x,2), noisedim, nscale)
-        total += loss(wd,wg,x,z)
-        count += 1
+function test(wd,wg,data,o)
+    atype = !o[:nogpu] ? KnetArray{Float32} : Array{Float32}
+    sample(x) = sample_noise(atype, size(x,2), o[:zdim])
+    loss1 = loss2 = 0
+    for (x,y) in data
+        x = convert(atype, x)
+        z = convert(atype, sample(x))
+        loss1 += dloss(wd,wg,x,z)
+        loss2 += gloss(wg,wd,z)
     end
-    return total/count
+    return (loss1/length(data),loss2/length(data))
 end
 
 !isinteractive() && !isdefined(Core.Main, :load_only) && main(ARGS)
