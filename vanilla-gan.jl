@@ -25,6 +25,8 @@ function main(args)
         ("--adam"; action=:store_true; help="adam optimizer")
         ("--seed"; arg_type=Int; default=-1; help="random seed")
         ("--gcheck"; arg_type=Int; default=0; help="gradient checking")
+        ("--gridsize"; arg_type=Int64; nargs=2; default=[4,4])
+        ("--gridscale"; arg_type=Float64; default=2.0)
     end
 
     # parse args
@@ -65,7 +67,7 @@ function main(args)
     @printf("\nepoch: %d, losses: %g/%g\n", 0, loss1, loss2)
     if o[:outdir] != nothing
         out = generate(wg,o)
-        png = makegrid(out)
+        png = makegrid(out; gridsize=o[:gridsize], scale=o[:gridscale])
         filename = @sprintf("%04d.png",0)
         save(joinpath(o[:outdir],filename), png)
     end
@@ -87,7 +89,7 @@ function main(args)
         flush(STDOUT)
         if o[:outdir] != nothing
             out = generate(wg,o)
-            png = makegrid(out)
+            png = makegrid(out; gridsize=o[:gridsize], scale=o[:gridscale])
             filename = @sprintf("%04d.png",epoch)
             save(joinpath(o[:outdir],filename), png)
         end
@@ -168,18 +170,19 @@ function test(wd,wg,data,o)
     return (loss1/length(data),loss2/length(data))
 end
 
-function generate(wg,o,ninstances=16)
+function generate(wg,o)
     atype = !o[:nogpu] ? KnetArray{Float32} : Array{Float32}
     sample(n) = sample_noise(atype, n, o[:zdim])
+    ninstances = o[:gridsize][1] * o[:gridsize][2]
     z = convert(atype, sample(ninstances))
     y = G(wg,z)
 end
 
-function makegrid(y; gridsize=(4,4),scale=2, shape=(28,28))
+function makegrid(y; gridsize=[4,4], scale=2.0, shape=(28,28))
     y = convert(Array{Float64}, y)
     y = reshape(y, shape..., size(y,2))
     y = map(x->y[:,:,x]', [1:size(y,3)...])
-    shp = (shape[1]*scale, shape[2]*scale)
+    shp = map(x->Int(round(x*scale)), shape)
     y = map(x->Images.imresize(x,shp), y)
     gridx, gridy = gridsize
     outdims = (gridx*shp[1]+gridx+1,gridy*shp[2]+gridy+1)
@@ -200,6 +203,8 @@ function makegrid(y; gridsize=(4,4),scale=2, shape=(28,28))
         else
             y0 = y1+2
         end
+
+
     end
 
     return convert(Array{Float64,2}, map(x->isnan(x)?0:x, out))
