@@ -5,8 +5,6 @@ using GZip
 using Images
 using ImageMagick
 
-include("data.jl")
-
 function main(args)
     s = ArgParseSettings()
     s.description = string(
@@ -16,7 +14,8 @@ function main(args)
     @add_arg_table s begin
         ("--outdir"; default=nothing; help="generations save dir")
         ("--nogpu"; action=:store_true)
-        ("--hdim"; arg_type=Int64; default=128)
+        ("--dnet"; nargs='+'; arg_type=Int; default=[128])
+        ("--gnet"; nargs='+'; arg_type=Int; default=[128])
         ("--zdim"; arg_type=Int64; default=100)
         ("--winit"; arg_type=Float32; default=Float32(0.01))
         ("--epochs"; arg_type=Int; default=100)
@@ -25,8 +24,10 @@ function main(args)
         ("--adam"; action=:store_true; help="adam optimizer")
         ("--seed"; arg_type=Int; default=-1; help="random seed")
         ("--gcheck"; arg_type=Int; default=0; help="gradient checking")
-        ("--gridsize"; arg_type=Int64; nargs=2; default=[4,4])
+        ("--gridsize"; arg_type=Int64; nargs=2; default=[8,8])
         ("--gridscale"; arg_type=Float64; default=2.0)
+        ("--activations"; nargs=3; default=["tanh","tanh","tanh"])
+        ("--dropouts"; arg_type=Float64; nargs=3; default=[0.5,0.5,0.5])
     end
 
     # parse args
@@ -34,15 +35,19 @@ function main(args)
     isa(args, AbstractString) && (args=split(args))
     o = parse_args(args, s; as_symbols=true); println(o); flush(STDOUT)
     o[:seed] > 0 && srand(o[:seed])
+    o[:activations] = map(x->eval(parse(x)), o[:activations])
+    xscale = o[:activations][end] == tanh ? (255/2) : 255
+    xnorm  = o[:activations][end] == tanh ? 1 : 0
 
     # load data
     (xtrn,xtst,ytrn,ytst)=loaddata()
-    trn = minibatch(xtrn, ytrn, o[:batchsize])
-    tst = minibatch(xtst, ytst, o[:batchsize])
+    trn = minibatch(xtrn, ytrn, o[:batchsize]; xscale=xscale, xnorm=xnorm)
+    tst = minibatch(xtst, ytst, o[:batchsize]; xscale=xscale, xnorm=xnorm)
 
     # get parameters
     atype = !o[:nogpu] ? KnetArray{Float32} : Array{Float32}
-    wd, wg = initweights(atype, size(trn[1][1],1), o[:hdim], o[:zdim])
+    xdim = size(trn[1][1],1)
+    wd, wg = initweights(atype, xdim, o[:zdim], o[:dnet], o[:gnet])
 
     # gradient check
     if o[:gcheck] > 0
@@ -80,7 +85,7 @@ function main(args)
             x = convert(atype, trn[i][1])
             z = convert(atype, sample(x))
 
-            losses = train!(wd,wg,x,z,optd,optg)
+            losses = train!(wd,wg,x,z,o,optd,optg)
             loss1 += losses[1]; loss2 += losses[2]
         end
 
@@ -96,45 +101,69 @@ function main(args)
     end
 end
 
-function D(w,x)
-    h = relu(w[1] * x .+ w[2])
-    y = sigm(w[3] * h .+ w[4])
+function dropout(x,d)
+    if d > 0
+        return x .* (rand!(similar(AutoGrad.getval(x))) .> d) * (1/(1-d))
+    else
+        return x
+    end
 end
 
-function G(w,z)
-    h = relu(w[1] * z .+ w[2])
-    x = sigm(w[3] * h .+ w[4])
+function D(w,x; f1=tanh, pdrop=0.0)
+    for k = 1:2:length(w)-2
+        x = f1(w[k] * x .+ w[k+1])
+        x = dropout(x, pdrop)
+    end
+    x = w[end-1] * x .+ w[end]
 end
 
-function initweights(atype, xdim, hdim, zdim)
-    wd = Array(Any, 4)
-    wg = Array(Any, 4)
+function G(w,z; f2=tanh, f3=tanh, pdrop=0.5)
+    x = z
+    for k = 1:2:length(w)-2
+        x = f2(w[k] * x .+ w[k+1])
+        x = dropout(x, pdrop)
+    end
+    x = f3(w[end-1] * x .+ w[end])
+end
 
-    wd[1] = xavier(hdim,xdim)
-    wd[2] = zeros(hdim,1)
-    wd[3] = xavier(2,hdim)
-    wd[4] = zeros(2,1)
+function initweights(atype, xdim, zdim, dnet, gnet)
+    # discriminator weights
+    wd = Array(Any, 2*(1+length(dnet)))
+    x = xdim
+    for (k,y) in enumerate([dnet..., 2])
+        wd[2k-1] = xavier(y,x)
+        wd[2k] = zeros(y,1)
+        x = y
+    end
 
-    wg[1] = xavier(hdim,zdim)
-    wg[2] = zeros(hdim,1)
-    wg[3] = xavier(xdim,hdim)
-    wg[4] = zeros(xdim,1)
+    # generator weights
+    wg = Array(Any, 2*(1+length(gnet)))
+    x = zdim
+    for (k,y) in enumerate([gnet..., xdim])
+        wg[2k-1] = xavier(y,x)
+        wg[2k] = zeros(y,1)
+        x = y
+    end
 
-    return map(x->convert(atype, x), wd), map(x->convert(atype, x), wg)
+    map(x->convert(atype, x), wd), map(x->convert(atype, x), wg)
 end
 
 # loss for discriminator network
-function dloss(wd,wg,x,z,values=[])
-    x1  = sum(log(D(wd,x)))/size(x,2)
-    z1  = sum(log(1-D(wd,G(wg,z))))/size(z,2)
-    val = -0.5 * (x1+z1)
+function dloss(wd,wg,x,z,labels,fs,pdrops,values=[])
+    real = x
+    fake = G(wg,z; pdrop=pdrops[2], f2=fs[2], f3=fs[3])
+    data = hcat(real,fake)
+    pred = logp(D(wd,data; pdrop=pdrops[1], f1=fs[1]), 1)
+    val  = -sum(pred .* labels) / size(data,2)
     push!(values, val)
     return val
 end
 
 # loss for generator network
-function gloss(wg,wd,z,values=[])
-    val = -0.5*sum(log(D(wd,G(wg,z)))) / size(z,2)
+function gloss(wg,wd,z,labels,fs,pdrops,values=[])
+    data = G(wg,z; pdrop=pdrops[2], f2=fs[2], f3=fs[3])
+    pred = logp(D(wd,data; pdrop=pdrops[1], f1=fs[1]), 1)
+    val  = -sum(pred .* labels) / size(data,2)
     push!(values, val)
     return val
 end
@@ -148,13 +177,16 @@ end
 
 initopt(w,lr) = map(x->Adam(;lr=lr), w)
 
-function train!(wd,wg,x,z,optd,optg)
-    values = []
-    g = dlossgradient(wd,wg,x,z,values)
+function train!(wd,wg,x,z,o,optd,optg)
+    val = []
+    atype = typeof(AutoGrad.getval(wd[1]))
+    yx = zeros(2,size(x,2)); yx[1,:] = 1; yx = convert(atype, yx)
+    yz = zeros(2,size(z,2)); yz[2,:] = 1; yz = convert(atype, yz)
+    g = dlossgradient(wd,wg,x,z,hcat(yx,yz),o[:activations],o[:dropouts],val)
     for k = 1:length(wd); update!(wd[k], g[k], optd[k]); end
-    g = glossgradient(wg,wd,z,values)
+    g = glossgradient(wg,wd,z,yx,o[:activations],o[:dropouts],val)
     for k = 1:length(wg); update!(wg[k], g[k], optg[k]); end
-    return values
+    return val
 end
 
 function test(wd,wg,data,o)
@@ -164,8 +196,10 @@ function test(wd,wg,data,o)
     for (x,y) in data
         x = convert(atype, x)
         z = convert(atype, sample(x))
-        loss1 += dloss(wd,wg,x,z)
-        loss2 += gloss(wg,wd,z)
+        yx = zeros(2,size(x,2)); yx[1,:] = 1; yx = convert(atype, yx)
+        yz = zeros(2,size(z,2)); yz[2,:] = 1; yz = convert(atype, yz)
+        loss1 += dloss(wd,wg,x,z,hcat(yx,yz),o[:activations],o[:dropouts])
+        loss2 += gloss(wg,wd,z,yx,o[:activations],o[:dropouts])
     end
     return (loss1/length(data),loss2/length(data))
 end
@@ -175,11 +209,13 @@ function generate(wg,o)
     sample(n) = sample_noise(atype, n, o[:zdim])
     ninstances = o[:gridsize][1] * o[:gridsize][2]
     z = convert(atype, sample(ninstances))
-    y = G(wg,z)
+    y = G(wg,z; pdrop=o[:dropouts][end])
+    y = convert(Array{Float64}, y)
+    y = (y+1)/2
+    return min(1,max(0,y))
 end
 
 function makegrid(y; gridsize=[4,4], scale=2.0, shape=(28,28))
-    y = convert(Array{Float64}, y)
     y = reshape(y, shape..., size(y,2))
     y = map(x->y[:,:,x]', [1:size(y,3)...])
     shp = map(x->Int(round(x*scale)), shape)
@@ -203,11 +239,40 @@ function makegrid(y; gridsize=[4,4], scale=2.0, shape=(28,28))
         else
             y0 = y1+2
         end
-
-
     end
 
     return convert(Array{Float64,2}, map(x->isnan(x)?0:x, out))
+end
+
+function minibatch(
+    x, y, batchsize;
+    atype=Array{Float32}, xrows=784, yrows=10, xscale=255/2, xnorm=1)
+    xbatch(a)=convert(atype, reshape(a./xscale-xnorm, xrows, div(length(a),xrows)))
+    ybatch(a)=(a[a.==0]=10; convert(atype, sparse(convert(Vector{Int},a),1:length(a),one(eltype(a)),yrows,length(a))))
+    xcols = div(length(x),xrows)
+    xcols == length(y) || throw(DimensionMismatch())
+    data = Any[]
+    for i=1:batchsize:xcols-batchsize+1
+        j=i+batchsize-1
+        push!(data, (xbatch(x[1+(i-1)*xrows:j*xrows]), ybatch(y[i:j])))
+    end
+    return data
+end
+
+function loaddata()
+    info("Loading MNIST...")
+    gzload("train-images-idx3-ubyte.gz")[17:end],
+    gzload("t10k-images-idx3-ubyte.gz")[17:end],
+    gzload("train-labels-idx1-ubyte.gz")[9:end],
+    gzload("t10k-labels-idx1-ubyte.gz")[9:end]
+end
+
+function gzload(file; path=Knet.dir("data",file), url="http://yann.lecun.com/exdb/mnist/$file")
+    isfile(path) || download(url, path)
+    f = gzopen(path)
+    a = read(f)
+    close(f)
+    return(a)
 end
 
 !isinteractive() && !isdefined(Core.Main, :load_only) && main(ARGS)
