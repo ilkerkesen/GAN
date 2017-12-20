@@ -8,33 +8,47 @@ using Knet
 using Images
 using ArgParse
 
-include(Pkg.dir("Knet","data","mnist.jl"))
-
 function main(args)
     o = parse_options(args)
     o[:seed] > 0 && Knet.setseed(o[:seed])
 
-    # load model & data
-    wd, wg = initweights(o[:atype])
+    # load models, data, optimizers
+    wd, wg = initweights(o[:atype], o[:loadfile])
     xtrn,ytrn,xtst,ytst = Main.mnist()
     dtrn = minibatch(xtrn, ytrn, o[:batchsize]; xtype=atype)
+    optd = map(wi->eval(parse(o[:optim])), wd)
+    optg = map(wi->eval(parse(o[:optim])), wg)
+
+    # TODO: gradcheck
+    # gradcheck(...)
 
     # training
-
+    for epoch = 1:o[:epoch]
+        shuffle!(dtrn)
+        dlossval = glossval = 0
+        for k = 1:length(dtrn)
+            z = convert(o[:atype], randn(o[:zdim],o[:batchsize]))
+            real_data = dtrn[k]
+            dlossval += train_discriminator!(wd,wg,real_data,optd,o)
+            glossval += train_generator!(wg,wd,optg,o)
+        end
+    end
 end
 
 function parse_options(args)
     s = ArgParseSettings()
-    s.description = "Conditional Generative Adversarial Networks on MNIST."
+    s.description = "Deconvolutional Generative Adversarial Networks on MNIST."
 
     @add_arg_table s begin
         ("--atype"; default=(gpu()>=0?"KnetArray{Float32}":"Array{Float32}");
          help="array and float type to use")
-        ("--batchsize"; arg_type=Int; default=100; help="batch size")
+        ("--batchsize"; arg_type=Int; default=50; help="batch size")
         ("--zdim"; arg_type=Int; default=100; help="noise dimension")
-        ("--epochs"; arg_type=Int; default=3; help="number of training epochs")
+        ("--epochs"; arg_type=Int; default=20; help="# of training epochs")
         ("--seed"; arg_type=Int; default=-1; help="random seed")
         ("--gcheck"; arg_type=Int; default=0; help="gradient checking")
+        ("--optim"; default="Adam(;gclip=5.0)")
+        ("--loadfile"; default=nothing; help="file to load trained models")
     end
 
     isa(args, AbstractString) && (args=split(args))
@@ -54,7 +68,7 @@ function initweights(atype)
 end
 
 function initwd(atype)
-    N = 4
+    N = 8
     w = Array{Any}(N)
     w[1] = convert(atype, xavier(5,5,1,64))
     w[2] = convert(atype, zeros(1,1,64,1))
@@ -87,7 +101,7 @@ function gnet(wg,z)
     x = tanh.(x)
 end
 
-function dnet(w,x0,ygold)
+function dnet(w,x0)
     x = conv4(w[1], x0) .+ w[2]
     x = tanh.(x)
     x = pool(x; mode=2)
@@ -98,6 +112,44 @@ function dnet(w,x0,ygold)
     x = w[5] * x .+ w[6]
     x = tanh.(x)
     x = w[7] * x .+ w[8]
+end
+
+function dloss(w,x0,ygold)
+    ypred = dnet(w,x0)
+    return nll(ypred, ygold)
+end
+
+dlossgradient = gradloss(dloss)
+
+function train_discriminator!(wd,wg,real_data,optd,o)
+    real_images = first(real_data)
+    fake_images = begin
+        noise = randn(o[:zdim], div(length(real_images),784))
+        noise = convert(atype, noise)
+        generated = gnet(wg,noise)
+    end
+    nsamples = div(length(real_images),784)
+    input = hcat(real_images, fake_images)
+    labels = hcat(ones(Int64, 1, nsamples), 2*ones(Int64, 1, nsamples))
+    gradients, lossval = dlossgradient(wd,input,labels)
+    update!(wd, gradients, optd)
+    return lossval
+end
+
+function gloss(wg,wd,noise,ygold)
+    fake_images = gnet(wg,noise)
+    ypred = dnet(wd,fake_images)
+    return nll(ypred, ygold)
+end
+
+glossgradient = gradloss(gloss)
+
+function train_generator!(wg,wd,optg,o)
+    noise = convert(atype, randn(o[:zdim], 2o[:batchsize]))
+    labels = 2ones(Int64, 1, 2o[:batchsize])
+    gradients, lossval = glossgradient(wg,wd,noise,labels)
+    update!(wg,gradients,optg)
+    return lossval
 end
 
 splitdir(PROGRAM_FILE)[end] == "cgan2d.jl" && main(ARGS)
