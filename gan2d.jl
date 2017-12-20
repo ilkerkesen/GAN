@@ -35,6 +35,7 @@ function main(args)
         dlossval /= length(dtrn); glossval /= length(dtrn)
         println((:epoch,epoch,:dloss,dlossval,:gloss,glossval))
     end
+    return wd,wg
 end
 
 function parse_options(args)
@@ -100,7 +101,7 @@ function gnet(wg,z)
     x = reshape(x, 6,6,128,size(z,2))
     x = deconv4(wg[3],x; stride=2) .+ wg[4]
     x = deconv4(wg[5],x; stride=2) .+ wg[6]
-    x = tanh.(x)
+    x = sigm.(x)
 end
 
 function dnet(w,x0)
@@ -152,7 +153,7 @@ glossgradient = gradloss(gloss)
 
 function train_generator!(wg,wd,optg,o)
     noise = convert(o[:atype], randn(o[:zdim], 2o[:batchsize]))
-    labels = 2ones(Int64, 1, 2o[:batchsize])
+    labels = ones(Int64, 1, 2o[:batchsize])
     gradients, lossval = glossgradient(wg,wd,noise,labels)
     update!(wg,gradients,optg)
     return lossval
