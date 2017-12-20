@@ -15,7 +15,7 @@ function main(args)
     # load models, data, optimizers
     wd, wg = initweights(o[:atype], o[:loadfile])
     xtrn,ytrn,xtst,ytst = Main.mnist()
-    dtrn = minibatch(xtrn, ytrn, o[:batchsize]; xtype=atype)
+    dtrn = minibatch(xtrn, ytrn, o[:batchsize]; shuffle=true, xtype=o[:atype])
     optd = map(wi->eval(parse(o[:optim])), wd)
     optg = map(wi->eval(parse(o[:optim])), wg)
 
@@ -23,15 +23,17 @@ function main(args)
     # gradcheck(...)
 
     # training
-    for epoch = 1:o[:epoch]
-        shuffle!(dtrn)
+    println("training started...")
+    for epoch = 1:o[:epochs]
         dlossval = glossval = 0
-        for k = 1:length(dtrn)
+        for (x,y) in dtrn
             z = convert(o[:atype], randn(o[:zdim],o[:batchsize]))
-            real_data = dtrn[k]
+            real_data = x
             dlossval += train_discriminator!(wd,wg,real_data,optd,o)
             glossval += train_generator!(wg,wd,optg,o)
         end
+        dlossval /= length(dtrn); glossval /= length(dtrn)
+        println((:epoch,epoch,:dloss,dlossval,:gloss,glossval))
     end
 end
 
@@ -63,7 +65,7 @@ function leaky_relu(x, alpha=0.01)
     return x1 .+ x2
 end
 
-function initweights(atype)
+function initweights(atype,loadfile=nothing)
     wd, wg = initwd(atype), initwg(atype)
 end
 
@@ -85,7 +87,7 @@ function initwg(atype=Array{Float32}, zdim=100, winit=0.01)
     N = 6
     w = Array{Any}(N)
     w[1] = convert(atype, xavier(6*6*128, zdim))
-    w[2] = convert(atype, zeros(1,1,128,1))
+    w[2] = convert(atype, zeros(6*6*128,1))
     w[3] = convert(atype, xavier(4,4,64,128))
     w[4] = convert(atype, zeros(1,1,64,1))
     w[5] = convert(atype, xavier(2,2,1,64))
@@ -121,15 +123,19 @@ end
 
 dlossgradient = gradloss(dloss)
 
-function train_discriminator!(wd,wg,real_data,optd,o)
-    real_images = first(real_data)
+function train_discriminator!(wd,wg,real_images,optd,o)
     fake_images = begin
         noise = randn(o[:zdim], div(length(real_images),784))
-        noise = convert(atype, noise)
+        noise = convert(o[:atype], noise)
         generated = gnet(wg,noise)
     end
     nsamples = div(length(real_images),784)
-    input = hcat(real_images, fake_images)
+    input = begin
+        x1 = reshape(real_images, 784, size(real_images,4))
+        x2 = reshape(fake_images, 784, size(fake_images,4))
+        concat = hcat(x1,x2)
+        resized = reshape(concat, 28, 28, 1, size(concat,2))
+    end
     labels = hcat(ones(Int64, 1, nsamples), 2*ones(Int64, 1, nsamples))
     gradients, lossval = dlossgradient(wd,input,labels)
     update!(wd, gradients, optd)
@@ -145,13 +151,13 @@ end
 glossgradient = gradloss(gloss)
 
 function train_generator!(wg,wd,optg,o)
-    noise = convert(atype, randn(o[:zdim], 2o[:batchsize]))
+    noise = convert(o[:atype], randn(o[:zdim], 2o[:batchsize]))
     labels = 2ones(Int64, 1, 2o[:batchsize])
     gradients, lossval = glossgradient(wg,wd,noise,labels)
     update!(wg,gradients,optg)
     return lossval
 end
 
-splitdir(PROGRAM_FILE)[end] == "cgan2d.jl" && main(ARGS)
+splitdir(PROGRAM_FILE)[end] == "gan2d.jl" && main(ARGS)
 
 end # module
