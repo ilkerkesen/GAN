@@ -14,45 +14,54 @@ function main(args)
     o[:seed] > 0 && Knet.setseed(o[:seed])
 
     # load models, data, optimizers
-    wd, wg = load_weights(o[:atype], o[:zdim], o[:loadfile])
+    wd, wg, md, mg = load_weights(o[:atype], o[:zdim], o[:loadfile])
     xtrn,ytrn,xtst,ytst = Main.mnist()
     dtrn = minibatch(xtrn, ytrn, o[:batchsize]; shuffle=true, xtype=o[:atype])
-    optd = map(wi->Sgd(;lr=0.005), wd)
-    optg = map(wi->Adam(), wg)
+    optd = map(wi->eval(parse(o[:optim])), wd)
+    optg = map(wi->eval(parse(o[:optim])), wg)
+    z = sample_noise(o[:atype],o[:zdim],prod(o[:gridsize]))
 
-    # TODO: gradcheck
-    # gradcheck(...)
+    if o[:outdir] != nothing && !isdir(o[:outdir])
+        mkpath(o[:outdir])
+        mkpath(joinpath(o[:outdir],"models"))
+        mkpath(joinpath(o[:outdir],"generations"))
+    end
 
     # training
     println("training started..."); flush(STDOUT)
-    o[:outdir] != nothing && !isdir(o[:outdir]) && mkpath(o[:outdir])
     for epoch = 1:o[:epochs]
         dlossval = glossval = 0
-        for (x,y) in dtrn
+        @time for (x,y) in dtrn
             noise = sample_noise(o[:atype],o[:zdim],length(y))
-            dlossval += train_discriminator!(wd,wg,2x-1,y,noise,optd,o)
+            dlossval += train_discriminator!(wd,wg,md,mg,2x-1,y,noise,optd,o)
             noise = sample_noise(o[:atype],o[:zdim],length(y))
-            glossval += train_generator!(wg,wd,noise,y,optg,o)
+            glossval += train_generator!(wg,wd,mg,md,noise,y,optg,o)
         end
         dlossval /= length(dtrn); glossval /= length(dtrn)
         println((:epoch,epoch,:dloss,dlossval,:gloss,glossval))
         flush(STDOUT)
 
-        # save generation
+        # save models and generations
         if o[:outdir] != nothing
             filename = @sprintf("%04d.png",epoch)
-            filepath = joinpath(o[:outdir],filename)
-            plot_generations(wg,filepath)
+            filepath = joinpath(o[:outdir],"generations",filename)
+            plot_generations(
+                wg, mg; z=z, savefile=filepath,
+                scale=o[:gridscale], gridsize=o[:gridsize])
+
+            filename = @sprintf("%04d.jld2",epoch)
+            filepath = joinpath(o[:outdir],"models",filename)
+            save_weights(filepath,wd,wg,md,mg)
         end
     end
 
-    o[:savefile] != nothing && save_weights(o[:savefile], wd, wg)
-    return wd,wg
+    return wd,wg,md,mg
 end
 
 function parse_options(args)
     s = ArgParseSettings()
-    s.description = "Deconvolutional Generative Adversarial Networks on MNIST."
+    s.description =
+        "Deep Convolutional Generative Adversarial Networks on MNIST."
 
     @add_arg_table s begin
         ("--atype"; default=(gpu()>=0?"KnetArray{Float32}":"Array{Float32}");
@@ -62,11 +71,11 @@ function parse_options(args)
         ("--pdrop"; arg_type=Float64; default=.5; help="dropout probability")
         ("--epochs"; arg_type=Int; default=20; help="# of training epochs")
         ("--seed"; arg_type=Int; default=-1; help="random seed")
-        ("--gcheck"; arg_type=Int; default=0; help="gradient checking")
-        ("--optim"; default="Adam(;gclip=5.0)")
+        ("--gridsize"; arg_type=Int; nargs=2; default=[8,8])
+        ("--gridscale"; arg_type=Float64; default=2.0)
+        ("--optim"; default="Adam(;lr=0.0002, beta1=0.5)")
         ("--loadfile"; default=nothing; help="file to load trained models")
-        ("--savefile"; default=nothing; help="file to save trained models")
-        ("--outdir"; default=nothing; help="output directory for generations")
+        ("--outdir"; default=nothing; help="output dir for models/generations")
     end
 
     isa(args, AbstractString) && (args=split(args))
@@ -76,128 +85,26 @@ function parse_options(args)
     return o
 end
 
-function leaky_relu(x, alpha=0.01)
-    x1 = max.(0,x)
-    x2 = min.(0,x) * alpha
-    return x1 .+ x2
-end
-
 function load_weights(atype,zdim,loadfile=nothing)
     if loadfile == nothing
-        wd, wg = initwd(atype), initwg(atype,zdim)
+        wd, md = initwd(atype)
+        wg, mg = initwg(atype,zdim)
     else
-        @load loadfile wd wg
+        @load loadfile wd wg md mg
         wd = convert_weights(wd, atype)
         wg = convert_weights(wg, atype)
+        md = convert_moments(md, atype)
+        mg = convert_moments(mg, atype)
     end
-    return wd, wg
+    return wd, wg, md, mg
 end
 
-function initwd(atype)
-    N = 8
-    w = Array{Any}(N)
-    w[1] = xavier(5,5,1,10)
-    w[2] = zeros(1,1,10,1)
-    w[3] = xavier(5,5,10,20)
-    w[4] = zeros(1,1,20,1)
-    w[5] = xavier(1024,320)
-    w[6] = zeros(1024,1)
-    # w[7] = xavier(11,1024)
-    # w[8] = zeros(11,1)
-    w[7] = xavier(2,1024)
-    w[8] = zeros(2,1)
-    return convert_weights(w,atype)
-end
-
-function initwg(atype=Array{Float32}, zdim=100, winit=0.01)
-    N = 6
-    w = Array{Any}(N)
-    w[1] = xavier(6*6*20, zdim)
-    w[2] = zeros(6*6*20,1)
-    w[3] = xavier(4,4,10,20)
-    w[4] = zeros(1,1,10,1)
-    w[5] = xavier(2,2,1,10)
-    w[6] = zeros(1,1,1,1)
-    return convert_weights(w,atype)
-end
-
-function sample_noise(atype,zdim,nsamples,a=2,b=1)
-    return convert(atype, a*rand(zdim, nsamples)-b)
-end
-
-function plot_generations(wg, savefile=nothing; gridsize=(5,5), scale=2.0)
-    zdim = size(wg[1],2)
-    atype = wg[1] isa KnetArray ? KnetArray{Float32} : Array{Float32}
-    m, n = gridsize
-    nimg = m*n
-    z = sample_noise(atype,zdim,nimg)
-    generated = Array(0.5*(1+gnet(wg, z)))
-    grid = Main.mnistgrid(generated; gridsize=gridsize, scale=scale)
-    if savefile == nothing
-        display(colorview(Gray, grid))
-    else
-        save(savefile, grid)
-    end
-end
-
-function gnet(wg,z; pdrop=0.5, training=true)
-    x = tanh.(wg[1] * z .+ wg[2])
-    x = reshape(x, 6,6,20,size(z,2))
-    x = deconv4(wg[3],x; stride=2) .+ wg[4]
-    x = deconv4(wg[5],x; stride=2) .+ wg[6]
-    x = tanh.(x)
-end
-
-function dnet(w,x0; pdrop=0.5)
-    x = conv4(w[1], x0) .+ w[2]
-    x = tanh.(x)
-    x = pool(x; mode=2)
-    x = conv4(w[3], x) .+ w[4]
-    x = tanh.(x)
-    x = pool(x; mode=2)
-    x = mat(x)
-    x = w[5] * x .+ w[6]
-    x = tanh.(x)
-    x = w[7] * x .+ w[8]
-end
-
-function dloss(w,x0,ygold)
-    ypred = dnet(w,x0)
-    return nll(ypred, ygold)
-end
-
-dlossgradient = gradloss(dloss)
-
-function train_discriminator!(wd,wg,real_images,real_labels,noise,optd,o)
-    fake_images = gnet(wg,noise; training=true)
-    nsamples = div(length(real_images),784)
-    input = begin
-        x1 = reshape(real_images, 784, size(real_images,4))
-        x2 = reshape(fake_images, 784, size(fake_images,4))
-        concat = hcat(x1,x2)
-        resized = reshape(concat, 28, 28, 1, size(concat,2))
-    end
-    labels = hcat(1*ones(Int64, 1, nsamples),
-                  # reshape(real_labels, 1, nsamples),
-                  2*ones(Int64, 1, nsamples))
-    gradients, lossval = dlossgradient(wd,input,labels)
-    update!(wd, gradients, optd)
-    return lossval
-end
-
-function gloss(wg,wd,noise,ygold)
-    fake_images = gnet(wg,noise)
-    ypred = dnet(wd,fake_images)
-    return nll(ypred, ygold)
-end
-
-glossgradient = gradloss(gloss)
-
-function train_generator!(wg,wd,noise,labels,optg,o)
-    ygold = ones(Int64, 1, length(labels))
-    gradients, lossval = glossgradient(wg,wd,noise,ygold)
-    update!(wg,gradients,optg)
-    return lossval
+function save_weights(savefile,wd,wg,md,mg)
+    save(savefile,
+         "wd", convert_weights(wd),
+         "wg", convert_weights(wg),
+         "md", convert_moments(md),
+         "mg", convert_moments(mg))
 end
 
 function convert_weights(w, atype=Array{Float32})
@@ -205,8 +112,185 @@ function convert_weights(w, atype=Array{Float32})
     w1 = convert(Array{Any}, w0)
 end
 
-function save_weights(savefile,wd,wg)
-    save(savefile, "wd", convert_weights(wd), "wg", convert_weights(wg))
+
+function convert_moments(moments,atype=Array{Float32})
+    clone = map(mi->bnmoments(), moments)
+    for k = 1:length(clone)
+        if moments[k].mean != nothing
+            clone[k].mean = convert(atype, moments[k].mean)
+        end
+
+        if moments[k].var != nothing
+            clone[k].var = convert(atype, moments[k].var)
+        end
+    end
+    return convert(Array{Any,1}, clone)
+end
+
+
+function leaky_relu(x, alpha=0.2)
+    pos = max(0,x)
+    neg = min(0,x) * alpha
+    return pos + neg
+end
+
+function sample_noise(atype,zdim,nsamples,mu=0.5,sigma=0.5)
+    noise = convert(atype, randn(zdim,nsamples))
+    normalized = (noise-mu)/sigma
+end
+
+function initwd(atype, winit=0.01)
+    w = Any[]
+    m = Any[]
+
+    push!(w, winit*randn(5,5,1,20))
+    push!(w, bnparams(20))
+    push!(m, bnmoments())
+
+    push!(w, winit*randn(5,5,20,50))
+    push!(w, bnparams(50))
+    push!(m, bnmoments())
+
+    push!(w, winit*randn(500,800))
+    push!(w, bnparams(500))
+    push!(m, bnmoments())
+
+    push!(w, winit*randn(2,500))
+    push!(w, zeros(2,1))
+    return convert_weights(w,atype), m
+end
+
+function dnet(w,x0,m; training=true, alpha=0.2)
+    x1 = dlayer1(x0, w[1:2], m[1]; training=training)
+    x2 = dlayer1(x1, w[3:4], m[2]; training=training)
+    x3 = reshape(x2, 800,size(x2,4))
+    x4 = dlayer2(x3, w[5:6], m[3]; training=training)
+    x5 = w[end-1] * x4 .+ w[end]
+end
+
+function dlayer1(x0, w, m; stride=1, padding=0, alpha=0.2, training=true)
+    x = conv4(w[1], x0; stride=stride, padding=padding)
+    x = batchnorm(x, m, w[2]; training=training)
+    x = leaky_relu.(x,alpha)
+    x = pool(x; mode=2)
+end
+
+function dlayer2(x, w, m; training=true, alpha=0.2)
+    x = w[1] * x
+    x = batchnorm(x, m, w[2]; training=training)
+    x = leaky_relu.(x, alpha)
+end
+
+function dloss(w,m,real_images,real_labels,fake_images,fake_labels)
+    yreal = dnet(w,real_images,m)
+    real_loss = nll(yreal, real_labels)
+    yfake = dnet(w,fake_images,m)
+    fake_loss = nll(yfake, fake_labels)
+    return real_loss + fake_loss
+end
+
+dlossgradient = gradloss(dloss)
+
+function train_discriminator!(wd,wg,md,mg,real_images,ygold,noise,optd,o)
+    fake_images = gnet(wg,noise,mg; training=true)
+    nsamples = div(length(real_images),784)
+    real_labels = ones(Int64, 1, nsamples)
+    fake_labels = 2ones(Int64, 1, nsamples)
+    gradients, lossval = dlossgradient(
+        wd,md,real_images,real_labels,fake_images,fake_labels)
+    update!(wd, gradients, optd)
+    return lossval
+end
+
+function initwg(atype=Array{Float32}, zdim=100, winit=0.01)
+    w = Any[]
+    m = Any[]
+
+    # 2 dense layers combined with batch normalization layers
+    push!(w, winit*randn(500,zdim))
+    push!(w, bnparams(500))
+    push!(m, bnmoments())
+
+    push!(w, winit*randn(800,500)) # reshape 4x4x16
+    push!(w, bnparams(800))
+    push!(m, bnmoments())
+
+    # 3 deconv layers combined with batch normalization layers
+    push!(w, winit*randn(2,2,50,50))
+    push!(w, bnparams(50))
+    push!(m, bnmoments())
+
+    push!(w, winit*randn(5,5,20,50))
+    push!(w, bnparams(20))
+    push!(m, bnmoments())
+
+    push!(w, winit*randn(2,2,20,20))
+    push!(w, bnparams(20))
+    push!(m, bnmoments())
+
+    # final deconvolution layer
+    push!(w, winit*randn(5,5,1,20))
+    push!(w, winit*randn(1,1,1,1))
+    return convert_weights(w,atype), m
+end
+
+function gnet(wg,z,m; pdrop=0.5, training=true)
+    x1 = glayer1(z, wg[1:2], m[1]; training=training)
+    x2 = glayer1(x1, wg[3:4], m[2]; training=training)
+    x3 = reshape(x2, 4,4,50,size(x2,2))
+    x4 = glayer2(x3, wg[5:6], m[3]; training=training)
+    x5 = glayer3(x4, wg[7:8], m[4]; training=training)
+    x6 = glayer2(x5, wg[9:10], m[5]; training=training)
+    x7 = tanh.(deconv4(wg[end-1], x6) .+ wg[end])
+end
+
+function glayer1(x0, w, m; training=true)
+    x = w[1] * x0
+    x = batchnorm(x, m, w[2]; training=training)
+    x = relu.(x)
+end
+
+function glayer2(x0, w, m; training=true)
+    x = deconv4(w[1], x0; stride=2)
+    x = batchnorm(x, m, w[2]; training=training)
+end
+
+function glayer3(x0, w, m; training=true)
+    x = deconv4(w[1], x0)
+    x = batchnorm(x, m, w[2]; training=training)
+    x = relu.(x)
+end
+
+function gloss(wg,wd,mg,md,noise,ygold)
+    fake_images = gnet(wg,noise,mg)
+    ypred = dnet(wd,fake_images,md)
+    return nll(ypred, ygold)
+end
+
+glossgradient = gradloss(gloss)
+
+function train_generator!(wg,wd,mg,md,noise,labels,optg,o)
+    ygold = ones(Int64, 1, length(labels))
+    gradients, lossval = glossgradient(wg,wd,mg,md,noise,ygold)
+    update!(wg,gradients,optg)
+    return lossval
+end
+
+function plot_generations(
+    wg, mg; z=nothing, gridsize=(8,8), scale=2.0, savefile=nothing)
+    if z == nothing
+        nimg = prod(gridsize)
+        zdim = size(wg[1],2)
+        atype = wg[1] isa KnetArray ? KnetArray{Float32} : Array{Float32}
+        z = sample_noise(atype,zdim,nimg)
+    end
+    generated = Array(0.5*(1+gnet(wg,z,mg; training=false)))
+    grid = Main.mnistgrid(generated; gridsize=gridsize, scale=scale)
+    if savefile == nothing
+        display(colorview(Gray, grid))
+    else
+        save(savefile, grid)
+    end
 end
 
 splitdir(PROGRAM_FILE)[end] == "gan2d.jl" && main(ARGS)
