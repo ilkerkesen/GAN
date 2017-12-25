@@ -3,7 +3,7 @@ for p in ("Knet","ArgParse","Images")
 end
 include(Pkg.dir("Knet","data","mnist.jl"))
 
-module GAN2D
+module DCGAN
 using Knet
 using Images
 using ArgParse
@@ -81,7 +81,9 @@ function parse_options(args)
     isa(args, AbstractString) && (args=split(args))
     o = parse_args(args, s; as_symbols=true)
     o[:atype] = eval(parse(o[:atype]))
-    o[:outdir] = abspath(o[:outdir])
+    if o[:outdir] != nothing
+        o[:outdir] = abspath(o[:outdir])
+    end
     return o
 end
 
@@ -277,7 +279,7 @@ function train_generator!(wg,wd,mg,md,noise,labels,optg,o)
 end
 
 function plot_generations(
-    wg, mg; z=nothing, gridsize=(8,8), scale=2.0, savefile=nothing)
+    wg, mg; z=nothing, gridsize=(8,8), scale=1.0, savefile=nothing)
     if z == nothing
         nimg = prod(gridsize)
         zdim = size(wg[1],2)
@@ -293,6 +295,6 @@ function plot_generations(
     end
 end
 
-splitdir(PROGRAM_FILE)[end] == "gan2d.jl" && main(ARGS)
+splitdir(PROGRAM_FILE)[end] == "dcgan.jl" && main(ARGS)
 
 end # module
