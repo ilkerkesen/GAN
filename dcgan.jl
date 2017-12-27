@@ -2,7 +2,18 @@ for p in ("Knet","ArgParse","Images")
     Pkg.installed(p) == nothing && Pkg.add(p)
 end
 include(Pkg.dir("Knet","data","mnist.jl"))
+include(Pkg.dir("Knet","data","imagenet.jl"))
 
+"""
+
+julia dcgan.jl --outdir ~/dcgan-out
+julia dcgan.jl -h # to see all other script options
+
+This example implements a DCGAN (Deep Convolutional Generative Adversarial Network) on MNIST dataset. This implemented model is not identical with the original model. LeNet is used as a base to adapt DCGAN to original MNIST data.1
+
+* Paper url: https://arxiv.org/abs/1511.06434
+
+"""
 module DCGAN
 using Knet
 using Images
@@ -66,9 +77,8 @@ function parse_options(args)
     @add_arg_table s begin
         ("--atype"; default=(gpu()>=0?"KnetArray{Float32}":"Array{Float32}");
          help="array and float type to use")
-        ("--batchsize"; arg_type=Int; default=50; help="batch size")
-        ("--zdim"; arg_type=Int; default=200; help="noise dimension")
-        ("--pdrop"; arg_type=Float64; default=.5; help="dropout probability")
+        ("--batchsize"; arg_type=Int; default=100; help="batch size")
+        ("--zdim"; arg_type=Int; default=100; help="noise dimension")
         ("--epochs"; arg_type=Int; default=20; help="# of training epochs")
         ("--seed"; arg_type=Int; default=-1; help="random seed")
         ("--gridsize"; arg_type=Int; nargs=2; default=[8,8])
@@ -236,7 +246,7 @@ function initwg(atype=Array{Float32}, zdim=100, winit=0.01)
     return convert_weights(w,atype), m
 end
 
-function gnet(wg,z,m; pdrop=0.5, training=true)
+function gnet(wg,z,m; training=true)
     x1 = glayer1(z, wg[1:2], m[1]; training=training)
     x2 = glayer1(x1, wg[3:4], m[2]; training=training)
     x3 = reshape(x2, 4,4,50,size(x2,2))
@@ -286,8 +296,9 @@ function plot_generations(
         atype = wg[1] isa KnetArray ? KnetArray{Float32} : Array{Float32}
         z = sample_noise(atype,zdim,nimg)
     end
-    generated = Array(0.5*(1+gnet(wg,z,mg; training=false)))
-    grid = Main.mnistgrid(generated; gridsize=gridsize, scale=scale)
+    output = Array(0.5*(1+gnet(wg,z,mg; training=false)))
+    images = map(i->output[:,:,:,i], 1:size(output,4))
+    grid = Main.make_image_grid(images; gridsize=gridsize, scale=scale)
     if savefile == nothing
         display(colorview(Gray, grid))
     else
