@@ -4,7 +4,17 @@ end
 include(Pkg.dir("Knet","data","mnist.jl"))
 include(Pkg.dir("Knet","data","imagenet.jl"))
 
-module CGAN
+"""
+
+julia dcgan.jl --outdir ~/dcgan-out
+julia dcgan.jl -h # to see all other script options
+
+This example implements a DCGAN (Deep Convolutional Generative Adversarial Network) on MNIST dataset. This implemented model is not identical with the original model. LeNet is used as a base to adapt DCGAN to original MNIST data.1
+
+* Paper url: https://arxiv.org/abs/1511.06434
+
+"""
+module ConditionalDCGAN
 using Knet
 using Images
 using ArgParse
@@ -35,9 +45,8 @@ function main(args)
     for epoch = 1:o[:epochs]
         dlossval = glossval = 0
         @time for (x,y) in dtrn
-            x0 = 2x-1; x0 = reshape(x0, 784, div(length(x0),784))
             noise = sample_noise(o[:atype],o[:zdim],length(y))
-            dlossval += train_discriminator!(wd,wg,md,mg,x0,y,noise,optd,o)
+            dlossval += train_discriminator!(wd,wg,md,mg,2x-1,y,noise,optd,o)
             noise = sample_noise(o[:atype],o[:zdim],length(y))
             glossval += train_generator!(wg,wd,mg,md,noise,y,optg,o)
         end
@@ -64,7 +73,7 @@ end
 
 function parse_options(args)
     s = ArgParseSettings()
-    s.description = "Conditional GANs on MNIST."
+    s.description = "Conditioanl DCGANs on MNIST."
 
     @add_arg_table s begin
         ("--atype"; default=(gpu()>=0?"KnetArray{Float32}":"Array{Float32}");
@@ -73,7 +82,7 @@ function parse_options(args)
         ("--zdim"; arg_type=Int; default=100; help="noise dimension")
         ("--epochs"; arg_type=Int; default=20; help="# of training epochs")
         ("--seed"; arg_type=Int; default=-1; help="random seed")
-        ("--gridsize"; arg_type=Int; nargs=2; default=[9,9])
+        ("--gridsize"; arg_type=Int; nargs=2; default=[8,8])
         ("--gridscale"; arg_type=Float64; default=2.0)
         ("--optim"; default="Adam(;lr=0.0002, beta1=0.5)")
         ("--loadfile"; default=nothing; help="file to load trained models")
@@ -92,7 +101,7 @@ end
 function load_weights(atype,zdim,loadfile=nothing)
     if loadfile == nothing
         wd, md = initwd(atype)
-        wg, mg = initwg(atype)
+        wg, mg = initwg(atype,zdim)
     else
         @load loadfile wd wg md mg
         wd = convert_weights(wd, atype)
@@ -147,35 +156,48 @@ function initwd(atype, winit=0.01)
     w = Any[]
     m = Any[]
 
-    # fc layers for inputs (x,y)
-    push!(w, winit*randn(1024,784))
-    push!(w, zeros(1024,1))
-    push!(w, winit*randn(1024,10))
-    push!(w, zeros(1024,1))
-
-    # fc layers for concatenated
-    push!(w, winit*randn(512,2048))
-    push!(w, bnparams(512))
-    push!(m, bnmoments())
-    push!(w, winit*randn(256,512))
-    push!(w, bnparams(256))
+    push!(w, winit*randn(5,5,1,20))
+    push!(w, bnparams(20))
     push!(m, bnmoments())
 
-    push!(w, winit*randn(2,256))
+    push!(w, winit*randn(5,5,20,50))
+    push!(w, bnparams(50))
+    push!(m, bnmoments())
+
+    push!(w, winit*randn(500,800))
+    push!(w, bnparams(500))
+    push!(m, bnmoments())
+
+    push!(w, winit*randn(2,500))
     push!(w, zeros(2,1))
     return convert_weights(w,atype), m
 end
 
-function dnet(w,x,y,m; training=true, pdrop=0.5, alpha=0.2)
-    x1 = leaky_relu.(w[1] * x .+ w[2], alpha)
-    x2 = leaky_relu.(w[3][:,y] .+ w[4])
-    x3 = vcat(x1,x2)
-    x4 = leaky_relu.(batchnorm(w[5]*x3, m[1], w[6]), alpha)
-    x5 = leaky_relu.(batchnorm(w[7]*x4, m[2], w[8]), alpha)
-    x6 = w[9] * x5 .+ w[10]
+function dnet(w,x,y,m; training=true, alpha=0.2)
+    a0 = w[9][:,y]
+    a1 = vcat(a0, reshape(x, 784, size(x,4)))
+    x0 = reshape(a1, 28, 28, 2, size(x,4))
+    x1 = dlayer1(x0, w[1:2], m[1]; training=training)
+    x2 = dlayer1(x1, w[3:4], m[2]; training=training)
+    x3 = reshape(x2, 800,size(x2,4))
+    x4 = dlayer2(x3, w[5:6], m[3]; training=training)
+    x5 = w[7] * x4 .+ w[8]
 end
 
-function dloss(w,m,real_images,real_labels,fake_images,fake_labels,ygold)
+function dlayer1(x0, w, m; stride=1, padding=0, alpha=0.2, training=true)
+    x = conv4(w[1], x0; stride=stride, padding=padding)
+    x = batchnorm(x, m, w[2]; training=training)
+    x = leaky_relu.(x,alpha)
+    x = pool(x; mode=2)
+end
+
+function dlayer2(x, w, m; training=true, alpha=0.2)
+    x = w[1] * x
+    x = batchnorm(x, m, w[2]; training=training)
+    x = leaky_relu.(x, alpha)
+end
+
+function dloss(w,m,real_images,real_labels,fake_images,fake_labels, ygold)
     yreal = dnet(w,real_images,ygold,m)
     real_loss = nll(yreal, real_labels)
     yfake = dnet(w,fake_images,ygold,m)
@@ -186,52 +208,77 @@ end
 dlossgradient = gradloss(dloss)
 
 function train_discriminator!(wd,wg,md,mg,real_images,ygold,noise,optd,o)
-    fake_images = gnet(wg,noise,ygold,mg; training=true)
+    fake_images = gnet(wg,noise,mg; training=true)
     nsamples = div(length(real_images),784)
     real_labels = ones(Int64, 1, nsamples)
     fake_labels = 2ones(Int64, 1, nsamples)
     gradients, lossval = dlossgradient(
-        wd,md,real_images,real_labels,fake_images,fake_labels,ygold)
+        wd,md,real_images,real_labels,fake_images,fake_labels)
     update!(wd, gradients, optd)
     return lossval
 end
 
-function initwg(atype, winit=0.01)
+function initwg(atype=Array{Float32}, zdim=100, winit=0.01)
     w = Any[]
     m = Any[]
 
-    push!(w, winit*randn(256,100))
-    push!(w, bnparams(256))
+    # 2 dense layers combined with batch normalization layers
+    push!(w, winit*randn(500,zdim))
+    push!(w, bnparams(500))
     push!(m, bnmoments())
 
-    push!(w, winit*randn(256,10))
-    push!(w, bnparams(256))
+    push!(w, winit*randn(800,500)) # reshape 4x4x16
+    push!(w, bnparams(800))
     push!(m, bnmoments())
 
-    push!(w, winit*randn(512,512))
-    push!(w, bnparams(512))
+    # 3 deconv layers combined with batch normalization layers
+    push!(w, winit*randn(2,2,50,50))
+    push!(w, bnparams(50))
     push!(m, bnmoments())
 
-    push!(w, winit*randn(1024,512))
-    push!(w, bnparams(1024))
+    push!(w, winit*randn(5,5,20,50))
+    push!(w, bnparams(20))
     push!(m, bnmoments())
 
-    push!(w, winit*randn(784,1024))
-    push!(w, zeros(784,1))
+    push!(w, winit*randn(2,2,20,20))
+    push!(w, bnparams(20))
+    push!(m, bnmoments())
 
+    # final deconvolution layer
+    push!(w, winit*randn(5,5,1,20))
+    push!(w, winit*randn(1,1,1,1))
     return convert_weights(w,atype), m
 end
 
-function gnet(w,z,y,m; training=true, pdrop=0.5)
-    x0 = relu.(batchnorm(w[1]*z, m[1], w[2]))
-    x1 = relu.(batchnorm(w[3][:,y], m[2], w[4]))
-    x2 = vcat(x0,x1)
-    x3 = relu.(batchnorm(w[5]*x2, m[3], w[6]))
-    x4 = relu.(batchnorm(w[7]*x3, m[4], w[8]))
-    x5 = tanh.(w[9] * x4 .+ w[10])
+function gnet(wg,z,y,m; training=true)
+    x0 = vcat(z,w[13][:,y])
+    x1 = glayer1(z, wg[1:2], m[1]; training=training)
+    x2 = glayer1(x1, wg[3:4], m[2]; training=training)
+    x3 = reshape(x2, 4,4,50,size(x2,2))
+    x4 = glayer2(x3, wg[5:6], m[3]; training=training)
+    x5 = glayer3(x4, wg[7:8], m[4]; training=training)
+    x6 = glayer2(x5, wg[9:10], m[5]; training=training)
+    x7 = tanh.(deconv4(wg[11], x6) .+ wg[12])
 end
 
-function gloss(wg,wd,mg,md,noise,ygold,labels)
+function glayer1(x0, w, m; training=true)
+    x = w[1] * x0
+    x = batchnorm(x, m, w[2]; training=training)
+    x = relu.(x)
+end
+
+function glayer2(x0, w, m; training=true)
+    x = deconv4(w[1], x0; stride=2)
+    x = batchnorm(x, m, w[2]; training=training)
+end
+
+function glayer3(x0, w, m; training=true)
+    x = deconv4(w[1], x0)
+    x = batchnorm(x, m, w[2]; training=training)
+    x = relu.(x)
+end
+
+function gloss(wg,wd,mg,md,noise,labels)
     fake_images = gnet(wg,noise,labels,mg)
     ypred = dnet(wd,fake_images,labels,md)
     return nll(ypred, ygold)
@@ -247,15 +294,15 @@ function train_generator!(wg,wd,mg,md,noise,labels,optg,o)
 end
 
 function plot_generations(
-    wg, mg, labels; z=nothing, gridsize=(8,8), scale=1.0, savefile=nothing)
+    wg, mg; z=nothing, gridsize=(8,8), scale=1.0, savefile=nothing)
     if z == nothing
         nimg = prod(gridsize)
         zdim = size(wg[1],2)
         atype = wg[1] isa KnetArray ? KnetArray{Float32} : Array{Float32}
         z = sample_noise(atype,zdim,nimg)
     end
-    output = Array(0.5*(1+gnet(wg,z,labels,mg; training=false)))
-    images = map(i->reshape(output[:,i], 28, 28, 1), 1:size(output,2))
+    output = Array(0.5*(1+gnet(wg,z,mg; training=false)))
+    images = map(i->output[:,:,:,i], 1:size(output,4))
     grid = Main.make_image_grid(images; gridsize=gridsize, scale=scale)
     if savefile == nothing
         display(colorview(Gray, grid))
@@ -264,6 +311,6 @@ function plot_generations(
     end
 end
 
-splitdir(PROGRAM_FILE)[end] == "conditional-gan.jl" && main(ARGS)
+splitdir(PROGRAM_FILE)[end] == "conditional-dcgan.jl" && main(ARGS)
 
 end # module
