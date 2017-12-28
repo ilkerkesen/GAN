@@ -82,7 +82,7 @@ function parse_options(args)
         ("--zdim"; arg_type=Int; default=100; help="noise dimension")
         ("--epochs"; arg_type=Int; default=20; help="# of training epochs")
         ("--seed"; arg_type=Int; default=-1; help="random seed")
-        ("--gridsize"; arg_type=Int; nargs=2; default=[8,8])
+        ("--gridsize"; arg_type=Int; nargs=2; default=[9,9])
         ("--gridscale"; arg_type=Float64; default=2.0)
         ("--optim"; default="Adam(;lr=0.0002, beta1=0.5)")
         ("--loadfile"; default=nothing; help="file to load trained models")
@@ -156,7 +156,7 @@ function initwd(atype, winit=0.01)
     w = Any[]
     m = Any[]
 
-    push!(w, winit*randn(5,5,1,20))
+    push!(w, winit*randn(5,5,2,20))
     push!(w, bnparams(20))
     push!(m, bnmoments())
 
@@ -170,6 +170,8 @@ function initwd(atype, winit=0.01)
 
     push!(w, winit*randn(2,500))
     push!(w, zeros(2,1))
+
+    push!(w, winit*randn(784,10))
     return convert_weights(w,atype), m
 end
 
@@ -208,22 +210,22 @@ end
 dlossgradient = gradloss(dloss)
 
 function train_discriminator!(wd,wg,md,mg,real_images,ygold,noise,optd,o)
-    fake_images = gnet(wg,noise,mg; training=true)
+    fake_images = gnet(wg,noise,ygold,mg; training=true)
     nsamples = div(length(real_images),784)
     real_labels = ones(Int64, 1, nsamples)
     fake_labels = 2ones(Int64, 1, nsamples)
     gradients, lossval = dlossgradient(
-        wd,md,real_images,real_labels,fake_images,fake_labels)
+        wd,md,real_images,real_labels,fake_images,fake_labels,ygold)
     update!(wd, gradients, optd)
     return lossval
 end
 
-function initwg(atype=Array{Float32}, zdim=100, winit=0.01)
+function initwg(atype=Array{Float32}, zdim=100, embed=100, winit=0.01)
     w = Any[]
     m = Any[]
 
     # 2 dense layers combined with batch normalization layers
-    push!(w, winit*randn(500,zdim))
+    push!(w, winit*randn(500,zdim+embed))
     push!(w, bnparams(500))
     push!(m, bnmoments())
 
@@ -247,12 +249,15 @@ function initwg(atype=Array{Float32}, zdim=100, winit=0.01)
     # final deconvolution layer
     push!(w, winit*randn(5,5,1,20))
     push!(w, winit*randn(1,1,1,1))
+
+    # embedding layer for labels
+    push!(w, winit*randn(embed,10))
     return convert_weights(w,atype), m
 end
 
 function gnet(wg,z,y,m; training=true)
-    x0 = vcat(z,w[13][:,y])
-    x1 = glayer1(z, wg[1:2], m[1]; training=training)
+    x0 = vcat(z,wg[13][:,y])
+    x1 = glayer1(x0, wg[1:2], m[1]; training=training)
     x2 = glayer1(x1, wg[3:4], m[2]; training=training)
     x3 = reshape(x2, 4,4,50,size(x2,2))
     x4 = glayer2(x3, wg[5:6], m[3]; training=training)
@@ -278,7 +283,7 @@ function glayer3(x0, w, m; training=true)
     x = relu.(x)
 end
 
-function gloss(wg,wd,mg,md,noise,labels)
+function gloss(wg,wd,mg,md,noise,ygold,labels)
     fake_images = gnet(wg,noise,labels,mg)
     ypred = dnet(wd,fake_images,labels,md)
     return nll(ypred, ygold)
@@ -294,14 +299,14 @@ function train_generator!(wg,wd,mg,md,noise,labels,optg,o)
 end
 
 function plot_generations(
-    wg, mg; z=nothing, gridsize=(8,8), scale=1.0, savefile=nothing)
+    wg, mg, labels; z=nothing, gridsize=(8,8), scale=1.0, savefile=nothing)
     if z == nothing
         nimg = prod(gridsize)
         zdim = size(wg[1],2)
         atype = wg[1] isa KnetArray ? KnetArray{Float32} : Array{Float32}
         z = sample_noise(atype,zdim,nimg)
     end
-    output = Array(0.5*(1+gnet(wg,z,mg; training=false)))
+    output = Array(0.5*(1+gnet(wg,z,labels,mg; training=false)))
     images = map(i->output[:,:,:,i], 1:size(output,4))
     grid = Main.make_image_grid(images; gridsize=gridsize, scale=scale)
     if savefile == nothing
