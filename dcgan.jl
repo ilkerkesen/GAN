@@ -44,9 +44,9 @@ function main(args)
         dlossval = glossval = 0
         @time for (x,y) in dtrn
             noise = sample_noise(o[:atype],o[:zdim],length(y))
-            dlossval += train_discriminator!(wd,wg,md,mg,2x-1,y,noise,optd,o)
+            dlossval += train_discriminator!(wd,wg,md,mg,2x-1,noise,optd,o)
             noise = sample_noise(o[:atype],o[:zdim],length(y))
-            glossval += train_generator!(wg,wd,mg,md,noise,y,optg,o)
+            glossval += train_generator!(wg,wd,mg,md,noise,optg,o)
         end
         dlossval /= length(dtrn); glossval /= length(dtrn)
         println((:epoch,epoch,:dloss,dlossval,:gloss,glossval))
@@ -167,8 +167,8 @@ function initwd(atype, winit=0.01)
     push!(w, bnparams(500))
     push!(m, bnmoments())
 
-    push!(w, winit*randn(2,500))
-    push!(w, zeros(2,1))
+    push!(w, winit*randn(1,500))
+    push!(w, zeros(1,1))
     return convert_weights(w,atype), m
 end
 
@@ -178,6 +178,7 @@ function dnet(w,x0,m; training=true, alpha=0.2)
     x3 = reshape(x2, 800,size(x2,4))
     x4 = dlayer2(x3, w[5:6], m[3]; training=training)
     x5 = w[end-1] * x4 .+ w[end]
+    x6 = sigm.(x5)
 end
 
 function dlayer1(x0, w, m; stride=1, padding=0, alpha=0.2, training=true)
@@ -193,23 +194,20 @@ function dlayer2(x, w, m; training=true, alpha=0.2)
     x = leaky_relu.(x, alpha)
 end
 
-function dloss(w,m,real_images,real_labels,fake_images,fake_labels)
+function dloss(w,m,real_images,fake_images)
     yreal = dnet(w,real_images,m)
-    real_loss = nll(yreal, real_labels)
+    real_loss = -mean(log.(yreal))
     yfake = dnet(w,fake_images,m)
-    fake_loss = nll(yfake, fake_labels)
-    return real_loss + fake_loss
+    fake_loss = -mean(log.(1-yfake))
+    return real_loss+fake_loss
 end
 
 dlossgradient = gradloss(dloss)
 
-function train_discriminator!(wd,wg,md,mg,real_images,ygold,noise,optd,o)
+function train_discriminator!(wd,wg,md,mg,real_images,noise,optd,o)
     fake_images = gnet(wg,noise,mg; training=true)
     nsamples = div(length(real_images),784)
-    real_labels = ones(Int64, 1, nsamples)
-    fake_labels = 2ones(Int64, 1, nsamples)
-    gradients, lossval = dlossgradient(
-        wd,md,real_images,real_labels,fake_images,fake_labels)
+    gradients, lossval = dlossgradient(wd,md,real_images,fake_images)
     update!(wd, gradients, optd)
     return lossval
 end
@@ -273,17 +271,16 @@ function glayer3(x0, w, m; training=true)
     x = relu.(x)
 end
 
-function gloss(wg,wd,mg,md,noise,ygold)
+function gloss(wg,wd,mg,md,noise)
     fake_images = gnet(wg,noise,mg)
     ypred = dnet(wd,fake_images,md)
-    return nll(ypred, ygold)
+    return -mean(log.(ypred))
 end
 
 glossgradient = gradloss(gloss)
 
-function train_generator!(wg,wd,mg,md,noise,labels,optg,o)
-    ygold = ones(Int64, 1, length(labels))
-    gradients, lossval = glossgradient(wg,wd,mg,md,noise,ygold)
+function train_generator!(wg,wd,mg,md,noise,optg,o)
+    gradients, lossval = glossgradient(wg,wd,mg,md,noise)
     update!(wg,gradients,optg)
     return lossval
 end
