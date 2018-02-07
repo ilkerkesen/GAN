@@ -22,6 +22,7 @@ using JLD2, FileIO
 
 function main(args)
     o = parse_options(args)
+    println(o)
     o[:seed] > 0 && Knet.setseed(o[:seed])
 
     # load models, data, optimizers
@@ -40,7 +41,8 @@ function main(args)
 
     # training
     println("training started..."); flush(STDOUT)
-    for epoch = 1:o[:epochs]
+    epoch = 1
+    while epoch <= o[:epochs]
         dlossval = glossval = 0
         nd = 0; ng = 0;
         @time for (x,y) in dtrn
@@ -68,6 +70,7 @@ function main(args)
             filepath = joinpath(o[:outdir],"models",filename)
             save_weights(filepath,wd,wg,md,mg)
         end
+        epoch += 1
     end
 
     return wd,wg,md,mg
@@ -82,7 +85,7 @@ function parse_options(args)
         ("--atype"; default=(gpu()>=0?"KnetArray{Float32}":"Array{Float32}");
          help="array and float type to use")
         ("--batchsize"; arg_type=Int; default=100; help="batch size")
-        ("--zdim"; arg_type=Int; default=10; help="noise dimension")
+        ("--zdim"; arg_type=Int; default=100; help="noise dimension")
         ("--epochs"; arg_type=Int; default=20; help="# of training epochs")
         ("--seed"; arg_type=Int; default=-1; help="random seed")
         ("--ncritic"; arg_type=Int; default=5; help="ncritic")
@@ -99,6 +102,7 @@ function parse_options(args)
     if o[:outdir] != nothing
         o[:outdir] = abspath(o[:outdir])
     end
+    o[:epochs] = o[:epochs] < 0 ? Inf : o[:epochs]
     return o
 end
 
