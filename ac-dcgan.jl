@@ -215,7 +215,7 @@ function dloss(w, m, real_images, fake_images, ygold)
     yreal, creal = dnet(w,real_images,ygold,m)
     yfake, cfake = dnet(w,fake_images,ygold,m)
     val1 = -mean(log.(yreal)) - mean(log.(1-yfake))
-    val2 = nll(creal,labels) + nll(cfake,labels)
+    val2 = nll(creal,ygold) + nll(cfake,ygold)
     return val1+val2
 end
 
