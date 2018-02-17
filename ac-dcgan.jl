@@ -295,7 +295,7 @@ end
 
 function gloss(wg,wd,mg,md,noise,labels)
     fake_images = gnet(wg,noise,labels,mg)
-    ypred = dnet(wd,fake_images,labels,md)
+    ypred, cpred = dnet(wd,fake_images,labels,md)
     return -mean(log.(ypred))
 end
 
