@@ -45,24 +45,34 @@ function main(args)
     for epoch = 1:o[:epochs]
         dlossval = glossval = 0
         @time for (x,y) in dtrn
+            # discriminator training
             noise = sample_noise(o[:atype],o[:zdim],length(y))
-            dlossval += train_discriminator!(wd,wg,md,mg,2x-1,y,noise,optd,o)
+            this_loss, dreal = train_discriminator!(
+                wd,wg,md,mg,2x-1,y,noise,optd,o)
+            dlossval =+ this_loss
+
+            # generator training
             noise = sample_noise(o[:atype],o[:zdim],length(y))
-            glossval += train_generator!(wg,wd,mg,md,noise,y,optg,o)
+            gfake = train_generator!(wg,wd,mg,md,noise,y,optg,o)
+            glossval += gfake
+
+            # balance them!
+            balance = o[:gamma] * dreal - gfake
+            o[:k] += o[:lambda] * balance
         end
         dlossval /= length(dtrn); glossval /= length(dtrn)
-        println((:epoch,epoch,:dloss,dlossval,:gloss,glossval))
+        println((:epoch,epoch,:dloss,dlossval,:gloss,glossval,:k,o[:k]))
         flush(STDOUT)
 
         # save models and generations
         if o[:outdir] != nothing
-            filename = @sprintf("%04d.png",epoch)
+            filename = @sprintf("%06d.png",epoch)
             filepath = joinpath(o[:outdir],"generations",filename)
             plot_generations(
                 wg, mg, l1; z=z, savefile=filepath,
                 scale=o[:gridscale], gridsize=o[:gridsize])
 
-            filename = @sprintf("%04d.jld2",epoch)
+            filename = @sprintf("%06d.jld2",epoch)
             filepath = joinpath(o[:outdir],"models",filename)
             save_weights(filepath,wd,wg,md,mg)
         end
@@ -85,9 +95,9 @@ function parse_options(args)
         ("--gridsize"; arg_type=Int; nargs=2; default=[9,9])
         ("--gridscale"; arg_type=Float64; default=2.0)
         ("--gamma"; arg_type=Float64; default=0.5)
-        ("--lam"; arg_type=Float64; default=1e-3)
+        ("--lambda"; arg_type=Float64; default=1e-3)
         ("--k"; arg_type=Float64; default=.0)
-        ("--optim"; default="Adam(;lr=0.0002, beta1=0.5)")
+        ("--optim"; default="Adam(;lr=1e-3)")
         ("--loadfile"; default=nothing; help="file to load trained models")
         ("--outdir"; default=nothing; help="output dir for models/generations")
     end
@@ -230,30 +240,36 @@ function dlayer2(x, w, m; training=true, alpha=0.2)
     x = leaky_relu.(x, alpha)
 end
 
-function dloss(w, m, real_images, fake_images, ygold, k)
+function dloss(w, m, real_images, fake_images, ygold, k; values=[])
     real_reconstructed = dnet(w,real_images,ygold,m)
     fake_reconstructed = dnet(w,fake_images,ygold,m)
 
     # reshape them to reduce
     npixels = prod(size(real_reconstructed,1,2,3))
-    batchsize = size(real_recontructed,4)
+    batchsize = size(real_reconstructed,4)
     real_reconstructed = reshape(real_reconstructed, npixels, batchsize)
     fake_reconstructed = reshape(fake_reconstructed, npixels, batchsize)
+    real_images = reshape(real_images, npixels, batchsize)
+    fake_images = reshape(fake_images, npixels, batchsize)
+
 
     real_loss = mean(sum(abs2, real_images-real_reconstructed, 1))
     fake_loss = mean(sum(abs2, fake_images-fake_reconstructed, 1))
+
+    push!(values, real_loss)
     return real_loss - k * fake_loss
 end
 
 dlossgradient = gradloss(dloss)
 
 function train_discriminator!(wd,wg,md,mg,real_images,ygold,noise,optd,o)
+    values = []
     fake_images = gnet(wg,noise,ygold,mg; training=true)
     nsamples = div(length(real_images),784)
     gradients, lossval = dlossgradient(
-        wd,md,real_images,fake_images,ygold)
+        wd,md,real_images,fake_images,ygold,o[:k]; values=values)
     update!(wd, gradients, optd)
-    return lossval
+    return lossval, values[1]
 end
 
 function initwg(atype=Array{Float32}, zdim=100, embed=100, winit=0.01)
@@ -325,6 +341,7 @@ function gloss(wg,wd,mg,md,noise,labels)
     npixels = prod(size(fake_reconstructed,1,2,3))
     batchsize = size(fake_reconstructed,4)
     fake_reconstructed = reshape(fake_reconstructed, npixels, batchsize)
+    fake_images = reshape(fake_images, npixels, batchsize)
     fake_loss = mean(sum(abs2, fake_images-fake_reconstructed, 1))
     return fake_loss
 end
