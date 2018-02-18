@@ -41,6 +41,7 @@ function main(args)
     end
 
     # training
+    k = 0
     println("training started..."); flush(STDOUT)
     for epoch = 1:o[:epochs]
         dlossval = glossval = 0
@@ -58,10 +59,11 @@ function main(args)
 
             # balance them!
             balance = o[:gamma] * dreal - gfake
-            o[:k] += o[:lambda] * balance
+            k += o[:lambda] * balance
+            k = min(max(0,k), 1)
         end
         dlossval /= length(dtrn); glossval /= length(dtrn)
-        println((:epoch,epoch,:dloss,dlossval,:gloss,glossval,:k,o[:k]))
+        println((:epoch,epoch,:dloss,dlossval,:gloss,glossval,:k,k))
         flush(STDOUT)
 
         # save models and generations
