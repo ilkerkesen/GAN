@@ -253,8 +253,8 @@ function dloss(w, m, real_images, fake_images, ygold, k; values=[])
     fake_images = reshape(fake_images, npixels, batchsize)
 
 
-    real_loss = mean(sum(abs2, real_images-real_reconstructed, 1))
-    fake_loss = mean(sum(abs2, fake_images-fake_reconstructed, 1))
+    real_loss = mean(sum(abs, real_images-real_reconstructed, 1))
+    fake_loss = mean(sum(abs, fake_images-fake_reconstructed, 1))
 
     push!(values, real_loss)
     return real_loss - k * fake_loss
@@ -342,7 +342,7 @@ function gloss(wg,wd,mg,md,noise,labels)
     batchsize = size(fake_reconstructed,4)
     fake_reconstructed = reshape(fake_reconstructed, npixels, batchsize)
     fake_images = reshape(fake_images, npixels, batchsize)
-    fake_loss = mean(sum(abs2, fake_images-fake_reconstructed, 1))
+    fake_loss = mean(sum(abs, fake_images-fake_reconstructed, 1))
     return fake_loss
 end
 
