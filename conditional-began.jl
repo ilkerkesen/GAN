@@ -41,28 +41,40 @@ function main(args)
     end
 
     # training
+    k = 0
     println("training started..."); flush(STDOUT)
     for epoch = 1:o[:epochs]
         dlossval = glossval = 0
         @time for (x,y) in dtrn
+            # discriminator training
             noise = sample_noise(o[:atype],o[:zdim],length(y))
-            dlossval += train_discriminator!(wd,wg,md,mg,2x-1,y,noise,optd,o)
+            this_loss, dreal = train_discriminator!(
+                wd,wg,md,mg,2x-1,y,noise,optd,o)
+            dlossval =+ this_loss
+
+            # generator training
             noise = sample_noise(o[:atype],o[:zdim],length(y))
-            glossval += train_generator!(wg,wd,mg,md,noise,y,optg,o)
+            gfake = train_generator!(wg,wd,mg,md,noise,y,optg,o)
+            glossval += gfake
+
+            # balance them!
+            balance = o[:gamma] * dreal - gfake
+            k += o[:lambda] * balance
+            k = min(max(0,k), 1)
         end
         dlossval /= length(dtrn); glossval /= length(dtrn)
-        println((:epoch,epoch,:dloss,dlossval,:gloss,glossval))
+        println((:epoch,epoch,:dloss,dlossval,:gloss,glossval,:k,k))
         flush(STDOUT)
 
         # save models and generations
         if o[:outdir] != nothing
-            filename = @sprintf("%04d.png",epoch)
+            filename = @sprintf("%06d.png",epoch)
             filepath = joinpath(o[:outdir],"generations",filename)
             plot_generations(
                 wg, mg, l1; z=z, savefile=filepath,
                 scale=o[:gridscale], gridsize=o[:gridsize])
 
-            filename = @sprintf("%04d.jld2",epoch)
+            filename = @sprintf("%06d.jld2",epoch)
             filepath = joinpath(o[:outdir],"models",filename)
             save_weights(filepath,wd,wg,md,mg)
         end
@@ -84,7 +96,10 @@ function parse_options(args)
         ("--seed"; arg_type=Int; default=-1; help="random seed")
         ("--gridsize"; arg_type=Int; nargs=2; default=[9,9])
         ("--gridscale"; arg_type=Float64; default=2.0)
-        ("--optim"; default="Adam(;lr=0.001)")
+        ("--gamma"; arg_type=Float64; default=0.5)
+        ("--lambda"; arg_type=Float64; default=1e-3)
+        ("--k"; arg_type=Float64; default=.0)
+        ("--optim"; default="Adam(;lr=1e-3)")
         ("--loadfile"; default=nothing; help="file to load trained models")
         ("--outdir"; default=nothing; help="output dir for models/generations")
     end
@@ -152,11 +167,12 @@ function sample_noise(atype,zdim,nsamples,mu=0.5,sigma=0.5)
     normalized = (noise-mu)/sigma
 end
 
-function initwd(atype, embed=100, winit=0.01)
+function initwd(atype, winit=0.01)
     w = Any[]
     m = Any[]
 
-    push!(w, winit*randn(5,5,1,20))
+    # encoder
+    push!(w, winit*randn(5,5,2,20))
     push!(w, bnparams(20))
     push!(m, bnmoments())
 
@@ -168,34 +184,49 @@ function initwd(atype, embed=100, winit=0.01)
     push!(w, bnparams(500))
     push!(m, bnmoments())
 
-    # real/fake classifier
-    push!(w, winit*randn(1,500+embed))
-    push!(w, zeros(1,1))
+    # decoder
+    push!(w, winit*randn(800,500))
+    push!(w, bnparams(800))
+    push!(m, bnmoments())
 
-    # auxiliary classifier
-    push!(w, winit*randn(10,500))
-    push!(w, zeros(10,1))
+    push!(w, winit*randn(2,2,50,50))
+    push!(w, bnparams(50))
+    push!(m, bnmoments())
+
+    push!(w, winit*randn(5,5,20,50))
+    push!(w, bnparams(20))
+    push!(m, bnmoments())
+
+    push!(w, winit*randn(2,2,20,20))
+    push!(w, bnparams(20))
+    push!(m, bnmoments())
+
+    push!(w, winit*randn(5,5,1,20))
+    push!(w, zeros(1,1,1,1))
 
     # embedding
-    push!(w, winit*randn(embed,10))
+    push!(w, winit*randn(784,10))
 
     return convert_weights(w,atype), m
 end
 
-function dnet(w,x0,y,m; training=true, alpha=0.2)
+function dnet(w,x,y,m; training=true, alpha=0.2)
+    # encoder
+    a0 = w[17][:,y]
+    a1 = vcat(a0, reshape(x, 784, size(x,4)))
+    x0 = reshape(a1, 28, 28, 2, size(x,4))
     x1 = dlayer1(x0, w[1:2], m[1]; training=training)
     x2 = dlayer1(x1, w[3:4], m[2]; training=training)
     x3 = reshape(x2, 800,size(x2,4))
     x4 = dlayer2(x3, w[5:6], m[3]; training=training)
 
-    # real/fake classification
-    x5 = w[7] * vcat(x4, w[end][:,y]) .+ w[8]
-    x6 = sigm.(x5)
-
-    # auxiliary classifier
-    x7 = w[9] * x4 .+ w[10]
-
-    return x6, x7
+    # decoder
+    x5 = glayer1(x4, w[7:8], m[4]; training=training)
+    x6 = reshape(x5, 4,4,50,size(x5,2))
+    x7 = glayer2(x6, w[9:10], m[5]; training=training)
+    x8 = glayer3(x7, w[11:12], m[6]; training=training)
+    x9 = glayer2(x8, w[13:14], m[7]; training=training)
+    x10 = tanh.(deconv4(w[15], x9) .+ w[16])
 end
 
 function dlayer1(x0, w, m; stride=1, padding=0, alpha=0.2, training=true)
@@ -211,23 +242,36 @@ function dlayer2(x, w, m; training=true, alpha=0.2)
     x = leaky_relu.(x, alpha)
 end
 
-function dloss(w, m, real_images, fake_images, ygold)
-    yreal, creal = dnet(w,real_images,ygold,m)
-    yfake, cfake = dnet(w,fake_images,ygold,m)
-    val1 = -mean(log.(yreal+1e-8)) - mean(log.(1-yfake+1e-8))
-    val2 = nll(creal,ygold) + nll(cfake,ygold)
-    return val1+val2
+function dloss(w, m, real_images, fake_images, ygold, k; values=[])
+    real_reconstructed = dnet(w,real_images,ygold,m)
+    fake_reconstructed = dnet(w,fake_images,ygold,m)
+
+    # reshape them to reduce
+    npixels = prod(size(real_reconstructed,1,2,3))
+    batchsize = size(real_reconstructed,4)
+    real_reconstructed = reshape(real_reconstructed, npixels, batchsize)
+    fake_reconstructed = reshape(fake_reconstructed, npixels, batchsize)
+    real_images = reshape(real_images, npixels, batchsize)
+    fake_images = reshape(fake_images, npixels, batchsize)
+
+
+    real_loss = mean(sum(abs, real_images-real_reconstructed, 1))
+    fake_loss = mean(sum(abs, fake_images-fake_reconstructed, 1))
+
+    push!(values, real_loss)
+    return real_loss - k * fake_loss
 end
 
 dlossgradient = gradloss(dloss)
 
 function train_discriminator!(wd,wg,md,mg,real_images,ygold,noise,optd,o)
+    values = []
     fake_images = gnet(wg,noise,ygold,mg; training=true)
     nsamples = div(length(real_images),784)
     gradients, lossval = dlossgradient(
-        wd,md,real_images,fake_images,ygold)
+        wd,md,real_images,fake_images,ygold,o[:k]; values=values)
     update!(wd, gradients, optd)
-    return lossval
+    return lossval, values[1]
 end
 
 function initwg(atype=Array{Float32}, zdim=100, embed=100, winit=0.01)
@@ -295,8 +339,13 @@ end
 
 function gloss(wg,wd,mg,md,noise,labels)
     fake_images = gnet(wg,noise,labels,mg)
-    ypred, cpred = dnet(wd,fake_images,labels,md)
-    return -mean(log.(ypred+1e-8)) + nll(cpred,labels)
+    fake_reconstructed = dnet(wd,fake_images,labels,md)
+    npixels = prod(size(fake_reconstructed,1,2,3))
+    batchsize = size(fake_reconstructed,4)
+    fake_reconstructed = reshape(fake_reconstructed, npixels, batchsize)
+    fake_images = reshape(fake_images, npixels, batchsize)
+    fake_loss = mean(sum(abs, fake_images-fake_reconstructed, 1))
+    return fake_loss
 end
 
 glossgradient = gradloss(gloss)
@@ -325,6 +374,6 @@ function plot_generations(
     end
 end
 
-splitdir(PROGRAM_FILE)[end] == "ac-dcgan.jl" && main(ARGS)
+splitdir(PROGRAM_FILE)[end] == "conditional-began.jl" && main(ARGS)
 
 end # module

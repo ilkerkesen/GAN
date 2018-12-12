@@ -84,7 +84,7 @@ function parse_options(args)
         ("--seed"; arg_type=Int; default=-1; help="random seed")
         ("--gridsize"; arg_type=Int; nargs=2; default=[9,9])
         ("--gridscale"; arg_type=Float64; default=2.0)
-        ("--optim"; default="Adam(;lr=0.001)")
+        ("--optim"; default="Adam(;lr=0.0002, beta1=0.5)")
         ("--loadfile"; default=nothing; help="file to load trained models")
         ("--outdir"; default=nothing; help="output dir for models/generations")
     end
@@ -152,11 +152,11 @@ function sample_noise(atype,zdim,nsamples,mu=0.5,sigma=0.5)
     normalized = (noise-mu)/sigma
 end
 
-function initwd(atype, embed=100, winit=0.01)
+function initwd(atype, winit=0.01)
     w = Any[]
     m = Any[]
 
-    push!(w, winit*randn(5,5,1,20))
+    push!(w, winit*randn(5,5,2,20))
     push!(w, bnparams(20))
     push!(m, bnmoments())
 
@@ -168,34 +168,23 @@ function initwd(atype, embed=100, winit=0.01)
     push!(w, bnparams(500))
     push!(m, bnmoments())
 
-    # real/fake classifier
-    push!(w, winit*randn(1,500+embed))
+    push!(w, winit*randn(1,500))
     push!(w, zeros(1,1))
 
-    # auxiliary classifier
-    push!(w, winit*randn(10,500))
-    push!(w, zeros(10,1))
-
-    # embedding
-    push!(w, winit*randn(embed,10))
-
+    push!(w, winit*randn(784,10))
     return convert_weights(w,atype), m
 end
 
-function dnet(w,x0,y,m; training=true, alpha=0.2)
+function dnet(w,x,y,m; training=true, alpha=0.2)
+    a0 = w[9][:,y]
+    a1 = vcat(a0, reshape(x, 784, size(x,4)))
+    x0 = reshape(a1, 28, 28, 2, size(x,4))
     x1 = dlayer1(x0, w[1:2], m[1]; training=training)
     x2 = dlayer1(x1, w[3:4], m[2]; training=training)
     x3 = reshape(x2, 800,size(x2,4))
     x4 = dlayer2(x3, w[5:6], m[3]; training=training)
-
-    # real/fake classification
-    x5 = w[7] * vcat(x4, w[end][:,y]) .+ w[8]
+    x5 = w[7] * x4 .+ w[8]
     x6 = sigm.(x5)
-
-    # auxiliary classifier
-    x7 = w[9] * x4 .+ w[10]
-
-    return x6, x7
 end
 
 function dlayer1(x0, w, m; stride=1, padding=0, alpha=0.2, training=true)
@@ -212,11 +201,11 @@ function dlayer2(x, w, m; training=true, alpha=0.2)
 end
 
 function dloss(w, m, real_images, fake_images, ygold)
-    yreal, creal = dnet(w,real_images,ygold,m)
-    yfake, cfake = dnet(w,fake_images,ygold,m)
-    val1 = -mean(log.(yreal+1e-8)) - mean(log.(1-yfake+1e-8))
-    val2 = nll(creal,ygold) + nll(cfake,ygold)
-    return val1+val2
+    yreal = dnet(w,real_images,ygold,m)
+    real_loss = -mean(log.(yreal))
+    yfake = dnet(w,fake_images,ygold,m)
+    fake_loss = -mean(log.(1-yfake))
+    return real_loss + fake_loss
 end
 
 dlossgradient = gradloss(dloss)
@@ -258,7 +247,7 @@ function initwg(atype=Array{Float32}, zdim=100, embed=100, winit=0.01)
 
     # final deconvolution layer
     push!(w, winit*randn(5,5,1,20))
-    push!(w, winit*randn(1,1,1,1))
+    push!(w, zeros(1,1,1,1))
 
     # embedding layer for labels
     push!(w, winit*randn(embed,10))
@@ -295,8 +284,8 @@ end
 
 function gloss(wg,wd,mg,md,noise,labels)
     fake_images = gnet(wg,noise,labels,mg)
-    ypred, cpred = dnet(wd,fake_images,labels,md)
-    return -mean(log.(ypred+1e-8)) + nll(cpred,labels)
+    ypred = dnet(wd,fake_images,labels,md)
+    return 0.5mean(abs2.(log.(ypred) - log.(1-ypred)))
 end
 
 glossgradient = gradloss(gloss)
@@ -325,6 +314,6 @@ function plot_generations(
     end
 end
 
-splitdir(PROGRAM_FILE)[end] == "ac-dcgan.jl" && main(ARGS)
+splitdir(PROGRAM_FILE)[end] == "conditional-bsgan.jl" && main(ARGS)
 
 end # module

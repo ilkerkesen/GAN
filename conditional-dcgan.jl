@@ -1,4 +1,4 @@
-for p in ("Knet","ArgParse","Images")
+for p in ("Knet","ArgParse","Images","JLD2")
     Pkg.installed(p) == nothing && Pkg.add(p)
 end
 include(Pkg.dir("Knet","data","mnist.jl"))
@@ -247,7 +247,7 @@ function initwg(atype=Array{Float32}, zdim=100, embed=100, winit=0.01)
 
     # final deconvolution layer
     push!(w, winit*randn(5,5,1,20))
-    push!(w, winit*randn(1,1,1,1))
+    push!(w, zeros(1,1,1,1))
 
     # embedding layer for labels
     push!(w, winit*randn(embed,10))
