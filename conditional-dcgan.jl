@@ -114,29 +114,6 @@ function sample_noise(atype,zdim,nsamples,mu=0.5,sigma=0.5)
     normalized = (noise .- mu) ./ sigma
 end
 
-function initwd(atype, winit=0.01)
-    w = Any[]
-    m = Any[]
-
-    push!(w, winit*randn(5,5,2,20))
-    push!(w, bnparams(20))
-    push!(m, bnmoments())
-
-    push!(w, winit*randn(5,5,20,50))
-    push!(w, bnparams(50))
-    push!(m, bnmoments())
-
-    push!(w, winit*randn(500,800))
-    push!(w, bnparams(500))
-    push!(m, bnmoments())
-
-    push!(w, winit*randn(1,500))
-    push!(w, zeros(1,1))
-
-    push!(w, winit*randn(784,10))
-    return convert_weights(w,atype), m
-end
-
 mutable struct DLayer1
     conv
     bnorm
