@@ -1,0 +1,4 @@
+name = "GAN"
+uuid = "1011d190-9dbc-11e9-1cca-73202cbc5f06"
+authors = ["Ilker Kesen <ilkerksn@gmail.com>"]
+version = "0.1.0"
